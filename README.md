@@ -1,4 +1,4 @@
-# ResearchRepro
+# OpenSearch
 
 > **Self-Correcting Scientific Experiment Agent**
 
