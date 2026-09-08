@@ -1,0 +1,29 @@
+{
+  "description": "Default hyperparameters for image classification baseline",
+  "reported_paper_accuracy": 0.970,
+  "reported_paper_f1": 0.968,
+  "model": {
+    "hidden_size": 128,
+    "hidden_layers": 2
+  },
+  "training": {
+    "max_iter": 50,
+    "lr": 0.001,
+    "batch_size": 200,
+    "solver": "adam",
+    "seed": 42
+  },
+  "preprocessing": {
+    "normalize": false,
+    "pca_components": 0
+  },
+  "constraints": {
+    "latency_budget_ms": 100.0,
+    "max_runtime_seconds": 300
+  },
+  "notes": {
+    "baseline_expected_accuracy": "~0.92-0.93 (without normalize)",
+    "with_normalize_expected": "~0.95-0.96",
+    "target_gap": "Agent must discover that normalization and solver tuning close the ~5pp gap"
+  }
+}
