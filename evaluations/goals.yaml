@@ -1,0 +1,73 @@
+# 10 evaluation goals for benchmarking agent performance
+# Format: id, objective, primary_metric, target_value, success_threshold, constraints
+
+goals:
+  - id: G01
+    objective: "Reproduce baseline image classification experiment on CIFAR-10"
+    primary_metric: accuracy
+    target_value: 0.942
+    success_threshold: 0.5
+    constraints: ["public_dataset_only"]
+
+  - id: G02
+    objective: "Reproduce data augmentation experiment and verify reported accuracy improvement"
+    primary_metric: accuracy
+    target_value: 0.920
+    success_threshold: 0.5
+    constraints: ["public_dataset_only"]
+
+  - id: G03
+    objective: "Verify the reported F1 score for a classification experiment"
+    primary_metric: f1
+    target_value: 0.91
+    success_threshold: 0.02
+    constraints: ["public_dataset_only"]
+
+  - id: G04
+    objective: "Reproduce optimizer comparison experiment (SGD vs Adam)"
+    primary_metric: accuracy
+    target_value: 0.895
+    success_threshold: 1.0
+    constraints: ["public_dataset_only"]
+
+  - id: G05
+    objective: "Reproduce learning rate schedule comparison (step vs cosine)"
+    primary_metric: accuracy
+    target_value: 0.930
+    success_threshold: 1.0
+    constraints: ["public_dataset_only"]
+
+  - id: G06
+    objective: "Reproduce weight decay ablation experiment"
+    primary_metric: accuracy
+    target_value: 0.910
+    success_threshold: 1.0
+    constraints: ["public_dataset_only"]
+
+  - id: G07
+    objective: "Handle and resolve preprocessing discrepancy from paper"
+    primary_metric: accuracy
+    target_value: 0.935
+    success_threshold: 1.0
+    constraints: ["public_dataset_only"]
+
+  - id: G08
+    objective: "Run experiment with intentionally broken experiment runner and recover"
+    primary_metric: accuracy
+    target_value: 0.880
+    success_threshold: 2.0
+    constraints: ["public_dataset_only"]
+
+  - id: G09
+    objective: "Detect and resolve metric inconsistency between training and evaluation"
+    primary_metric: accuracy
+    target_value: 0.900
+    success_threshold: 1.5
+    constraints: ["public_dataset_only"]
+
+  - id: G10
+    objective: "Reproduce experiment while satisfying strict latency constraint"
+    primary_metric: accuracy
+    target_value: 0.880
+    success_threshold: 2.0
+    constraints: ["public_dataset_only", "latency_under_100ms"]
