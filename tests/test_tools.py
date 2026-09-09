@@ -70,7 +70,7 @@ def test_extract_methodology_returns_hyperparameters():
 
 
 def test_run_experiment_baseline_below_target():
-    """Baseline should return ~0.867, deliberately below reported 0.942."""
+    """Default 128x2 stub matches the real MNIST cost-proxy trajectory."""
     registry = build_stub_registry()
     resp = registry.execute(
         "run_experiment",
@@ -78,7 +78,8 @@ def test_run_experiment_baseline_below_target():
     )
     assert resp.success is True
     acc = resp.data["accuracy"]
-    assert 0.8 < acc < 0.90, f"Expected baseline ~0.867, got {acc}"
+    assert acc == 0.961
+    assert resp.data["latency_ms"] > 100
 
 
 def test_run_experiment_with_normalize_fix_improves():
