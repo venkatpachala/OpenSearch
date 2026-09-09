@@ -345,6 +345,16 @@ wall-clock of 20 MNIST campaigns. Existing artifacts are the source of truth.
    crash into one `tool_crash_repair_and_retry` counter; both recoveries
    succeeded in the artifacts.
 
+## What you would improve with more time
+
+1. **Hardware-measured serving latency profiling**: Replace the parameter-count computational cost proxy with standardized hardware inference profiling (isolated CPU/GPU batch inference, warmups, and P95/P99 latency measurements via ONNX Runtime or TensorRT).
+2. **Constrained grammar decoding**: Enforce strict JSON grammar constraints (via Outlines, Guidance, or llama.cpp BNF grammars) on local 7B models during tool call generation to eliminate schema repair rounds at the source.
+3. **Multi-seed statistical significance testing**: Run 5–10 random seeds per benchmark goal to report confidence intervals, variance under non-determinism, and formal statistical significance (p-values) against naive retrying.
+4. **Broader benchmark environments**: Expand the real experiment suite beyond scikit-learn MLPs to include deep learning workloads (PyTorch vision backbones, Hugging Face transformer fine-tuning, and production vector RAG pipelines).
+5. **Active Pareto frontier exploration**: Maintain a multi-objective Pareto frontier (accuracy, latency proxy, memory, compute budget) in `ResearchMemory`, guiding exploration toward non-dominated architectures.
+6. **Automated independent verification enforcement**: Ensure independent validation rescoring is strictly required and automatically executed before declaring `GOAL_ACHIEVED` across all goals.
+
+
 ## Documentation map
 
 | Doc | Question it answers |
