@@ -150,6 +150,15 @@ GENERIC_HYPOTHESIS_MARKERS = (
 LATENCY_LIMIT_MS = 100.0
 MAX_NO_PROGRESS = 3
 METRIC_EPS = 1e-4
+JUSTIFIED_RETRY_REASONS = {
+    "non_determinism_verification",
+    "independent_evaluation",
+    "transient_timeout",
+    "corrupted_result",
+    "explicit_replication",
+    "schema_repair",
+    "tool_failure_retry",
+}
 
 
 class PlannerFailureContext(BaseModel):
@@ -741,15 +750,31 @@ def previous_experiment(memory: ResearchMemory) -> Experiment | None:
     return memory.experiments[-1]
 
 
-def _retry_allowed(memory: ResearchMemory, fingerprint: str) -> bool:
-    """Same configuration may be retried only for recorded non-determinism."""
+def _retry_allowed(
+    memory: ResearchMemory,
+    fingerprint: str,
+    tool_args: dict[str, Any] | None = None,
+) -> bool:
+    """Same configuration may be retried only with an explicit justified reason."""
+    args = tool_args or {}
+    reason = args.get("retry_reason")
+    if args.get("retry") and reason in JUSTIFIED_RETRY_REASONS:
+        return True
     if not memory.failures:
         return False
     last = memory.failures[-1]
-    if last.failure_type != FailureType.NON_DETERMINISM:
-        return False
-    rec = memory.tested_configs.get(fingerprint)
-    return rec is not None and rec.outcome != ConfigurationOutcome.INVALID_CONFIGURATION
+    if last.failure_type in {
+        FailureType.NON_DETERMINISM,
+        FailureType.RESULT_INCONSISTENCY,
+        FailureType.TOOL_CRASH,
+        FailureType.RESOURCE_FAILURE,
+        FailureType.TOOL_SCHEMA_ERROR,
+    }:
+        rec = memory.tested_configs.get(fingerprint)
+        if rec is not None and rec.outcome == ConfigurationOutcome.INVALID_CONFIGURATION:
+            return last.failure_type == FailureType.TOOL_SCHEMA_ERROR
+        return True
+    return False
 
 
 def build_planning_evidence(memory: ResearchMemory) -> PlanningEvidence:
@@ -908,7 +933,7 @@ def assess_proposal(memory: ResearchMemory, tool_name: str, tool_args: dict[str,
                 )
                 break
 
-    if tested_rec is not None and not _retry_allowed(memory, fp):
+    if tested_rec is not None and not _retry_allowed(memory, fp, canonical):
         streak = memory.no_progress_count + 1
         return ProposalAssessment(
             blocked=True,
@@ -926,7 +951,7 @@ def assess_proposal(memory: ResearchMemory, tool_name: str, tool_args: dict[str,
             progress_kind=ProgressKind.DUPLICATE_CONFIGURATION.value,
         )
 
-    if fp in rejected_fingerprints(memory) and not _retry_allowed(memory, fp):
+    if fp in rejected_fingerprints(memory) and not _retry_allowed(memory, fp, canonical):
         streak = memory.no_progress_count + 1
         return ProposalAssessment(
             blocked=True,

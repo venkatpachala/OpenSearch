@@ -16,6 +16,7 @@ Budget is still enforced here, not scattered.
 from __future__ import annotations
 
 import copy
+import json
 import time
 import uuid
 from datetime import datetime
@@ -76,7 +77,7 @@ from ..observability.events import EventType
 from ..observability.logger import EventLogger
 from ..tools.base import ToolRegistry, ToolResponse
 from ..recovery import RecoveryContext, RecoveryOrchestrator
-from .strategy import AgentStrategy, SelfCorrectingStrategy
+from .strategy import AgentStrategy, NaiveStrategy, SelfCorrectingStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +93,7 @@ class FinalReport(BaseModel):
     experiments_run: int
     self_corrections: int
     recovery_failures: int
+    retries: int = 0
     best_accuracy: float | None = None
     reported_accuracy: float | None = None
     gap: float | None = None
@@ -293,7 +295,9 @@ class AgentLoop:
 
         self_corrections = 0
         recovery_failures = 0
+        retries = 0
         step_count = 0
+        naive_policy = isinstance(self.strategy, NaiveStrategy)
 
         while not self.state_machine.is_terminal:
             step_count += 1
@@ -368,7 +372,10 @@ class AgentLoop:
                 self._try_transition(AgentPhase.COMPLETED)
                 break
             elif result.decision == Decision.DIAGNOSE_AND_RECOVER:
-                self_corrections += 1
+                if naive_policy:
+                    retries += 1
+                else:
+                    self_corrections += 1
                 recovered = self._handle_failure(result)
                 if not recovered:
                     recovery_failures += 1
@@ -376,6 +383,17 @@ class AgentLoop:
                     repaired = self._last_strategy_decision.repaired_tool_args
                     if repaired:
                         result.tool_args = repaired
+                    result.tool_args = dict(result.tool_args or {})
+                    result.tool_args["retry"] = True
+                    ft = result.evaluation.failure_type
+                    if ft == FailureType.TOOL_SCHEMA_ERROR:
+                        result.tool_args["retry_reason"] = "schema_repair"
+                    elif ft in (FailureType.TOOL_CRASH, FailureType.RESOURCE_FAILURE):
+                        result.tool_args["retry_reason"] = "transient_timeout"
+                    elif ft == FailureType.RESULT_INCONSISTENCY:
+                        result.tool_args["retry_reason"] = "corrupted_result"
+                    else:
+                        result.tool_args["retry_reason"] = "tool_failure_retry"
                     self._pending_retry = result
                 if self._last_strategy_decision and self._last_strategy_decision.action == "terminate":
                     break
@@ -388,7 +406,7 @@ class AgentLoop:
                 )
                 break
 
-        return self._build_report(self_corrections, recovery_failures)
+        return self._build_report(self_corrections, recovery_failures, retries)
 
     # ── Step result application (Phase 3: full integration) ─────────────────
 
@@ -649,6 +667,42 @@ class AgentLoop:
             outcome=outcome.value,
             rejected=rejected,
         )
+        exp_dir = self.run_dir / "experiments" / exp_id
+        if exp_dir.exists():
+            (exp_dir / "evaluation.json").write_text(
+                json.dumps(
+                    {
+                        "experiment_id": exp_id,
+                        "decision": result.evaluation.decision.value,
+                        "failure_type": (
+                            result.evaluation.failure_type.value
+                            if result.evaluation.failure_type else None
+                        ),
+                        "constraint_status": result.evaluation.constraint_status.value,
+                        "criterion_status": status_map,
+                        "outcome": outcome.value,
+                        "rationale": result.evaluation.rationale,
+                    },
+                    indent=2,
+                    default=str,
+                ),
+                encoding="utf-8",
+            )
+            hyp_path = exp_dir / "hypothesis.json"
+            hyp_path.write_text(
+                json.dumps(
+                    {
+                        "hypothesis": exp.hypothesis,
+                        "reason": exp.reason,
+                        "trigger": exp.trigger,
+                        "parent_id": parent_id,
+                        "canonical_configuration": params,
+                    },
+                    indent=2,
+                    default=str,
+                ),
+                encoding="utf-8",
+            )
 
     def _handle_failed_experiment(self, result: StepResult) -> None:
         """Record a tool/schema failure against the proposed configuration."""
@@ -845,6 +899,10 @@ class AgentLoop:
         """Dispatch a concrete recovery strategy and preserve its audit trail."""
         if not self.memory.failures or result.evaluation.failure_type is None:
             return False
+        if isinstance(self.strategy, NaiveStrategy):
+            decision = self.strategy.handle_result(result, self.memory)
+            self._last_strategy_decision = decision
+            return decision.success
         failure_type = result.evaluation.failure_type.value
         self.logger.log(EventType.RECOVERY_STARTED, failure_type=failure_type)
         # Strategy owns the policy: self-correcting recovery or naive retry.
@@ -1024,7 +1082,7 @@ class AgentLoop:
             to_phase=to.value,
         )
 
-    def _build_report(self, self_corrections: int, recovery_failures: int) -> FinalReport:
+    def _build_report(self, self_corrections: int, recovery_failures: int, retries: int = 0) -> FinalReport:
         best_result = self.memory.get_best_result()
         best_acc: float | None = None
         if best_result:
@@ -1054,6 +1112,7 @@ class AgentLoop:
             experiments_run=self.memory.budget.experiments_consumed,
             self_corrections=self_corrections,
             recovery_failures=recovery_failures,
+            retries=retries,
             best_accuracy=best_acc,
             reported_accuracy=self.goal.target_value,
             gap=gap,
