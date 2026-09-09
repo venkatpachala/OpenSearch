@@ -143,6 +143,19 @@ class TestBudgetState:
 
 
 class TestGoalContract:
+    def test_meets_contract_requires_latency_constraint(self):
+        from research_repro.memory.models import Constraint, MetricCriterion
+        goal = GoalContract(
+            objective="hit 96 with latency cap",
+            primary_metric="accuracy",
+            target_value=0.96,
+            criterion=MetricCriterion(metric="accuracy", direction="maximize", minimum=0.96),
+            constraints=[Constraint(name="latency_under_100ms", description="latency_under_100ms")],
+        )
+        assert goal.is_achieved(0.9635) is True
+        assert goal.meets_contract(0.9635, {"latency_ms": 156.9}) is False
+        assert goal.meets_contract(0.9635, {"latency_ms": 80.0}) is True
+
     def test_is_achieved_within_threshold(self):
         goal = GoalContract(
             objective="test",

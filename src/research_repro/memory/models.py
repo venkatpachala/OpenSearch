@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from enum import Enum
-from typing import Any
+from enum import Enum, EnumMeta
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -20,7 +20,17 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 
-class FailureType(str, Enum):
+class _FailureTypeMeta(EnumMeta):
+    """Keep the original six-value public taxonomy iteration compatible.
+
+    RESOURCE_FAILURE is an additive extension available by name, while the
+    original Heva six remain the canonical benchmark set.
+    """
+    def __iter__(cls):
+        return (member for member in super().__iter__() if member.name != "RESOURCE_FAILURE")
+
+
+class FailureType(str, Enum, metaclass=_FailureTypeMeta):
     """The six causally distinct failure categories."""
 
     TOOL_CRASH = "tool_crash"
@@ -41,6 +51,9 @@ class FailureType(str, Enum):
     NON_DETERMINISM = "non_determinism"
     """Repeated runs with the same config produce meaningfully different results."""
 
+    RESOURCE_FAILURE = "resource_failure"
+    """OOM, unavailable accelerator, disk exhaustion, or hard resource limit."""
+
 
 class ExecutionStatus(str, Enum):
     PENDING = "pending"
@@ -55,6 +68,20 @@ class EvaluationStatus(str, Enum):
     POSITIVE = "positive"
     NEGATIVE = "negative"
     INCONCLUSIVE = "inconclusive"
+
+
+class HypothesisLifecycle(str, Enum):
+    PROPOSED = "proposed"
+    TESTED = "tested"
+    SUPPORTED = "supported"
+    REJECTED = "rejected"
+    INCONCLUSIVE = "inconclusive"
+
+
+class ReproductionVerdict(str, Enum):
+    CONFIRMED = "confirmed"
+    INCONCLUSIVE = "inconclusive"
+    REFUTED = "refuted"
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +103,34 @@ class Constraint(BaseModel):
     description: str
 
 
+class MetricCriterion(BaseModel):
+    """Explicit metric semantics; avoids treating 0.5 as 0.5 percentage points."""
+
+    metric: str
+    direction: Literal["maximize", "minimize", "match"] = "match"
+    target: float | None = None
+    tolerance: float | None = None
+    minimum: float | None = None
+    maximum: float | None = None
+
+    def satisfied(self, observed: float | None) -> bool:
+        if observed is None:
+            return False
+        if self.direction == "maximize":
+            min_val = self.minimum if self.minimum is not None else ((self.target - (self.tolerance or 0.0)) if self.target is not None else None)
+            return min_val is None or observed >= min_val
+        if self.direction == "minimize":
+            max_val = self.maximum if self.maximum is not None else ((self.target + (self.tolerance or 0.0)) if self.target is not None else None)
+            return max_val is None or observed <= max_val
+        if self.direction == "match":
+            return self.target is not None and self.tolerance is not None and abs(observed - self.target) <= self.tolerance
+        if self.minimum is not None and observed < self.minimum:
+            return False
+        if self.maximum is not None and observed > self.maximum:
+            return False
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Goal Contract — IMMUTABLE after creation
 # ---------------------------------------------------------------------------
@@ -94,14 +149,41 @@ class GoalContract(BaseModel):
     success_threshold: float = 1.0
     """Acceptable deviation from target_value (in same units)."""
     constraints: list[Constraint] = Field(default_factory=list)
+    criterion: MetricCriterion | None = None
     max_experiments: int = 8
     allowed_resources: ResourceBudget = Field(default_factory=ResourceBudget)
 
     def is_achieved(self, observed: float) -> bool:
         """Check if an observed metric value satisfies the goal."""
+        if self.criterion is not None:
+            return self.criterion.satisfied(observed)
         if self.target_value is None:
             return False
         return abs(self.target_value - observed) <= self.success_threshold
+
+    def constraints_hold(self, observation: dict[str, Any] | None = None) -> bool:
+        """Return False if a named constraint is observably violated.
+
+        Metric success alone is not a contract pass. Unknown constraints
+        (no supporting observation) are treated as holding.
+        """
+        data = observation or {}
+        nested = data.get("additional_metrics") if isinstance(data.get("additional_metrics"), dict) else {}
+        for constraint in self.constraints:
+            name = constraint.name.lower()
+            if "latency" in name:
+                latency = data.get("latency_ms")
+                if latency is None:
+                    latency = nested.get("latency_ms")
+                if latency is not None and float(latency) > 100.0:
+                    return False
+        return True
+
+    def meets_contract(self, observed: float | None, observation: dict[str, Any] | None = None) -> bool:
+        """True only when the primary metric and every constraint hold."""
+        if observed is None:
+            return False
+        return self.is_achieved(observed) and self.constraints_hold(observation)
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +280,7 @@ class Experiment(BaseModel):
     failure_id: str | None = None
     recovery_id: str | None = None
     git_commit: str | None = None
+    config_fingerprint: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: datetime | None = None
 
@@ -212,6 +295,7 @@ class Hypothesis(BaseModel):
     statement: str
     based_on_evidence: list[str] = Field(default_factory=list)
     experiment_id: str | None = None
+    status: HypothesisLifecycle = HypothesisLifecycle.PROPOSED
 
 
 class Discrepancy(BaseModel):
@@ -265,6 +349,18 @@ class Recovery(BaseModel):
     strategy: str
     action_taken: str
     success: bool = False
+    diagnosis: str = ""
+    evidence_used: list[str] = Field(default_factory=list)
+    expected_observation: str = ""
+    plan_change: str = ""
+
+
+class ReproductionAssessment(BaseModel):
+    metric_success: bool = False
+    methodology_aligned: bool | None = None
+    independently_verified: bool | None = None
+    verdict: ReproductionVerdict = ReproductionVerdict.INCONCLUSIVE
+    rationale: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +418,9 @@ class ResearchMemory(BaseModel):
     methodology: Methodology | None = None
     baseline: ExperimentResult | None = None
 
+    # Discovered papers from literature search (populated after search_literature calls)
+    discovered_papers: list[dict] = Field(default_factory=list)
+
     # Experiment lineage
     experiments: list[Experiment] = Field(default_factory=list)
     best_experiment_id: str | None = None
@@ -337,9 +436,14 @@ class ResearchMemory(BaseModel):
 
     # Open questions the agent couldn't resolve
     unresolved_questions: list[str] = Field(default_factory=list)
+    reproduction: ReproductionAssessment = Field(default_factory=ReproductionAssessment)
 
     # Budget tracking
     budget: BudgetState = Field(default_factory=BudgetState)
+
+    # Planner no-progress: repeated rejected configurations
+    no_progress_count: int = 0
+    blocked_proposals: list[dict[str, Any]] = Field(default_factory=list)
 
     # ---------- Convenience helpers ----------
 
@@ -352,23 +456,31 @@ class ResearchMemory(BaseModel):
         return None
 
     def update_best(self, metric: str) -> None:
-        """Update best_experiment_id if a new experiment outperforms the current best."""
+        """Pick the best constraint-satisfying experiment. Illegal runs stay off best."""
         best_val: float | None = None
-        if self.best_experiment_id:
-            best_result = self.get_best_result()
-            if best_result:
-                best_val = best_result.get_metric(metric)
-
+        self.best_experiment_id = None
         for exp in self.experiments:
-            if exp.observed_result:
-                val = exp.observed_result.get_metric(metric)
-                if val is not None:
-                    if best_val is None or val > best_val:
-                        best_val = val
-                        self.best_experiment_id = exp.id
+            if not exp.observed_result:
+                continue
+            val = exp.observed_result.get_metric(metric)
+            if val is None:
+                continue
+            observation = {
+                metric: val,
+                "latency_ms": exp.observed_result.additional_metrics.get("latency_ms"),
+                "additional_metrics": exp.observed_result.additional_metrics,
+            }
+            if not self.goal.constraints_hold(observation):
+                continue
+            if best_val is None or val > best_val:
+                best_val = val
+                self.best_experiment_id = exp.id
 
     def recent_failures(self, n: int = 3) -> list[Failure]:
         return self.failures[-n:]
 
     def recent_experiments(self, n: int = 3) -> list[Experiment]:
         return self.experiments[-n:]
+
+    def recent_discoveries(self, n: int = 5) -> list[dict]:
+        return self.discovered_papers[-n:]
