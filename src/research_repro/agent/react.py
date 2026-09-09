@@ -11,7 +11,7 @@ The output (StepResult) is fed to the AgentLoop, which decides what to do next.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel
 
@@ -68,11 +68,13 @@ class ReactController:
         evaluator: SelfEvaluator,
         registry: ToolRegistry,
         logger: EventLogger,
+        proposal_guard: Callable[..., Any] | None = None,
     ) -> None:
         self.planner = planner
         self.evaluator = evaluator
         self.registry = registry
         self.logger = logger
+        self.proposal_guard = proposal_guard
 
     def step(self, memory: ResearchMemory) -> StepResult:
         """Execute one full REASON → ACT → OBSERVE → EVALUATE cycle."""
@@ -80,6 +82,31 @@ class ReactController:
 
         # ── 1. REASON ────────────────────────────────────────────────────────
         planner_output = self._reason(memory, step_index)
+        if self.proposal_guard is not None:
+            hint = None
+            for _attempt in range(2):
+                blocked = self.proposal_guard(memory, planner_output, step_index, record=False)
+                if blocked is None:
+                    break
+                hint = blocked.evaluation.rationale
+                planner_output = self.planner.plan(memory, self.registry, rejection_hint=hint)
+                self.logger.log(
+                    EventType.REASON,
+                    step=step_index,
+                    hypothesis=planner_output.reasoning.hypothesis,
+                    intended_action=planner_output.reasoning.intended_action,
+                    repair_after_rejection=True,
+                )
+                self.logger.log(
+                    EventType.ACTION,
+                    step=step_index,
+                    selected_tool=planner_output.selected_tool,
+                    tool_arguments=planner_output.tool_arguments,
+                    repair_after_rejection=True,
+                )
+            blocked = self.proposal_guard(memory, planner_output, step_index, record=True)
+            if blocked is not None:
+                return blocked
 
         # ── 2. ACT ───────────────────────────────────────────────────────────
         tool_response, schema_error = self._act(planner_output, step_index)
@@ -107,6 +134,25 @@ class ReactController:
             evaluation=evaluation,
             decision=evaluation.decision,
         )
+
+    def repeat(self, memory: ResearchMemory, previous: StepResult) -> StepResult:
+        """Execute the previous typed action again without invoking the planner."""
+        step_index = memory.step_count + 1
+        from .planner import PlannerOutput
+        planned = PlannerOutput(
+            reasoning=previous.reasoning,
+            selected_tool=previous.tool_name,
+            tool_arguments=previous.tool_args.copy(),
+            confidence=1.0,
+        )
+        self.logger.log(EventType.REASON, step=step_index, hypothesis=previous.reasoning.hypothesis, intended_action="retry exact previous action", retry_same_action=True)
+        self.logger.log(EventType.ACTION, step=step_index, selected_tool=planned.selected_tool, tool_arguments=planned.tool_arguments, retry_same_action=True)
+        tool_response, schema_error = self._act(planned, step_index)
+        if schema_error is not None:
+            tool_response = ToolResponse(success=False, error="TOOL_SCHEMA_ERROR", data=schema_error.to_feedback())
+        self._observe(planned, tool_response, step_index)
+        evaluation = self._evaluate(memory, planned, tool_response, step_index)
+        return StepResult(step_index=step_index, reasoning=previous.reasoning, tool_name=previous.tool_name, tool_args=previous.tool_args.copy(), tool_response=tool_response, evaluation=evaluation, decision=evaluation.decision)
 
     # ── Phase implementations ────────────────────────────────────────────────
 

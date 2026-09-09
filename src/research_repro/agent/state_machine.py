@@ -31,26 +31,34 @@ class AgentPhase(str, Enum):
 TRANSITIONS: dict[AgentPhase, list[AgentPhase]] = {
     AgentPhase.INITIALIZING: [
         AgentPhase.LITERATURE_DISCOVERY,
+        AgentPhase.EXPERIMENT_PLANNING,   # direct-execution goals skip literature
     ],
     AgentPhase.LITERATURE_DISCOVERY: [
         AgentPhase.PAPER_SELECTION,
+        AgentPhase.EXPERIMENT_PLANNING,
+        AgentPhase.RUNNING_EXPERIMENT,
         AgentPhase.FAILED,
     ],
     AgentPhase.PAPER_SELECTION: [
         AgentPhase.METHOD_EXTRACTION,
+        AgentPhase.EXPERIMENT_PLANNING,
         AgentPhase.FAILED,
     ],
     AgentPhase.METHOD_EXTRACTION: [
         AgentPhase.EXPERIMENT_PLANNING,
+        AgentPhase.RUNNING_EXPERIMENT,
         AgentPhase.FAILED,
     ],
     AgentPhase.EXPERIMENT_PLANNING: [
         AgentPhase.RUNNING_EXPERIMENT,
+        AgentPhase.SELF_EVALUATION,
+        AgentPhase.GENERATING_REPORT,
         AgentPhase.FAILED,
     ],
     AgentPhase.RUNNING_EXPERIMENT: [
         AgentPhase.SELF_EVALUATION,
         AgentPhase.DIAGNOSING,
+        AgentPhase.GENERATING_REPORT,
         AgentPhase.FAILED,
     ],
     AgentPhase.SELF_EVALUATION: [
@@ -58,13 +66,19 @@ TRANSITIONS: dict[AgentPhase, list[AgentPhase]] = {
         AgentPhase.EXPERIMENT_PLANNING,      # replan experiment
         AgentPhase.DIAGNOSING,               # failure detected
         AgentPhase.GENERATING_REPORT,        # goal achieved or budget exhausted
+        AgentPhase.COMPLETED,
     ],
     AgentPhase.DIAGNOSING: [
         AgentPhase.RECOVERING,
+        AgentPhase.REPLANNING,
+        AgentPhase.EXPERIMENT_PLANNING,
+        AgentPhase.RUNNING_EXPERIMENT,
         AgentPhase.GENERATING_REPORT,        # unresolvable — give up gracefully
     ],
     AgentPhase.RECOVERING: [
         AgentPhase.REPLANNING,
+        AgentPhase.EXPERIMENT_PLANNING,
+        AgentPhase.RUNNING_EXPERIMENT,
         AgentPhase.GENERATING_REPORT,        # recovery budget exhausted
     ],
     AgentPhase.REPLANNING: [

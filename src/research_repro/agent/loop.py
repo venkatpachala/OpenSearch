@@ -15,6 +15,8 @@ Budget is still enforced here, not scattered.
 """
 from __future__ import annotations
 
+import copy
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -22,11 +24,23 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from .planner import Planner
+from .planner import Planner, PlannerOutput
+from .planning_context import (
+    assess_proposal,
+    configuration_fingerprint,
+    record_blocked_proposal,
+)
 from .react import ReactController, StepResult
 from .state_machine import AgentPhase, StateMachine
 from ..config import Config
-from ..evaluation.evaluator import Decision, SelfEvaluator
+from ..evaluation.evaluator import (
+    ConstraintStatus,
+    Decision,
+    EvaluationResult,
+    GoalProgress,
+    HypothesisStatus,
+    SelfEvaluator,
+)
 from ..memory.experiment_graph import ExperimentGraph
 from ..memory.ledger import EvidenceLedger
 from ..memory.models import (
@@ -43,12 +57,16 @@ from ..memory.models import (
     Plan,
     Recovery,
     ResearchMemory,
+    HypothesisLifecycle,
+    ReproductionAssessment,
+    ReproductionVerdict,
 )
 from ..memory.store import MemoryStore
 from ..observability.events import EventType
 from ..observability.logger import EventLogger
-from ..tools.base import ToolRegistry
+from ..tools.base import ToolRegistry, ToolResponse
 from ..recovery import RecoveryContext, RecoveryOrchestrator
+from .strategy import AgentStrategy, SelfCorrectingStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +119,7 @@ class AgentLoop:
     Enhanced agent loop with full experiment graph + evidence integration.
     """
 
-    MAX_STEPS_SAFETY = 50
+    MAX_STEPS_SAFETY = 120
 
     def __init__(
         self,
@@ -109,6 +127,7 @@ class AgentLoop:
         run_id: str,
         config: Config,
         registry: ToolRegistry,
+        strategy: AgentStrategy | None = None,
     ) -> None:
         self.goal = goal
         self.run_id = run_id
@@ -143,10 +162,27 @@ class AgentLoop:
             evaluator=self.evaluator,
             registry=self.registry,
             logger=self.logger,
+            proposal_guard=self._guard_proposal,
         )
         self.recovery = RecoveryOrchestrator(
             max_total_recoveries=goal.allowed_resources.max_total_recoveries,
             max_recoveries_per_subtask=goal.allowed_resources.max_recoveries_per_subtask,
+        )
+        try:
+            checkpointer = self.registry.get("run_experiment").checkpointer
+        except (KeyError, AttributeError):
+            checkpointer = None
+        independent_evaluator = None
+        if "run_independent_evaluation" in self.registry:
+            eval_tool = self.registry.get("run_independent_evaluation")
+            independent_evaluator = lambda args: eval_tool.execute(
+                eval_tool.request_model(**args) if isinstance(args, dict) else args
+            ).data
+        self.strategy: AgentStrategy = strategy or SelfCorrectingStrategy(
+            self.recovery,
+            checkpointer,
+            independent_evaluator=independent_evaluator,
+            schema_repair=lambda args, errors: self._repair_schema_args("", args, errors),
         )
 
         # Initialize working memory
@@ -163,14 +199,67 @@ class AgentLoop:
 
         # Track current hypothesis for lifecycle management
         self._current_hypothesis_id: str | None = None
+        self._pending_retry: StepResult | None = None
+        self._last_strategy_decision = None
+
+    def _guard_proposal(
+        self,
+        memory: ResearchMemory,
+        planner_output: PlannerOutput,
+        step_index: int,
+        record: bool = True,
+    ) -> StepResult | None:
+        """Block silent repeats of rejected configs. Does not run the experiment."""
+        assessment = assess_proposal(memory, planner_output.selected_tool, planner_output.tool_arguments)
+        if not assessment.blocked:
+            return None
+        if record:
+            record_blocked_proposal(memory, assessment, planner_output.tool_arguments)
+            self.logger.log(
+                EventType.NO_PROGRESS,
+                step=step_index,
+                reason=assessment.reason,
+                fingerprint=assessment.fingerprint,
+                terminal=assessment.terminal,
+                streak=memory.no_progress_count,
+            )
+        else:
+            memory.blocked_proposals.append({
+                "fingerprint": assessment.fingerprint,
+                "configuration": planner_output.tool_arguments.get("parameters") or {},
+                "reason": assessment.reason,
+            })
+        evaluation = EvaluationResult(
+            execution_success=False,
+            output_valid=False,
+            metric_valid=False,
+            goal_progress=GoalProgress.NEGATIVE,
+            constraint_status=ConstraintStatus.ALL_MET,
+            hypothesis_status=HypothesisStatus.REJECTED,
+            failure_type=None,
+            decision=Decision.TERMINATE if (record and assessment.terminal) else Decision.CONTINUE,
+            confidence=1.0,
+            rationale=assessment.reason,
+        )
+        return StepResult(
+            step_index=step_index,
+            reasoning=planner_output.reasoning,
+            tool_name=planner_output.selected_tool,
+            tool_args=planner_output.tool_arguments,
+            tool_response=ToolResponse.fail(assessment.reason),
+            evaluation=evaluation,
+            decision=evaluation.decision,
+        )
 
     # ── Public API ───────────────────────────────────────────────────────────
 
     def run(self) -> FinalReport:
         """Run the agent loop to completion."""
         self.logger.log(EventType.GOAL_SET, goal=self.goal.model_dump(mode="json"))
-        self._create_initial_plan()
-        self._transition(AgentPhase.LITERATURE_DISCOVERY)
+        self._create_initial_plan()  # may pre-transition for direct goals
+        # Only go to LITERATURE_DISCOVERY if still in INITIALIZING phase
+        if self.state_machine.can_transition(AgentPhase.LITERATURE_DISCOVERY):
+            self._transition(AgentPhase.LITERATURE_DISCOVERY)
 
         self_corrections = 0
         recovery_failures = 0
@@ -195,7 +284,12 @@ class AgentLoop:
                 break
 
             try:
-                result = self.react.step(self.memory)
+                result = (
+                    self.react.repeat(self.memory, self._pending_retry)
+                    if self._pending_retry is not None
+                    else self.react.step(self.memory)
+                )
+                self._pending_retry = None
                 self.memory.step_count += 1
                 self._apply_step_result(result)
                 self.memory_store.save(self.memory)
@@ -210,13 +304,27 @@ class AgentLoop:
 
             # Route on decision
             if result.decision == Decision.GOAL_ACHIEVED:
-                self._transition(AgentPhase.GENERATING_REPORT)
+                self.logger.log(
+                    EventType.GOAL_ACHIEVED,
+                    metric=self.goal.primary_metric,
+                    target=self.goal.target_value,
+                    source="evaluator",
+                )
+                self._try_transition(AgentPhase.GENERATING_REPORT)
+                self._try_transition(AgentPhase.COMPLETED)
                 break
             elif result.decision == Decision.DIAGNOSE_AND_RECOVER:
                 self_corrections += 1
                 recovered = self._handle_failure(result)
                 if not recovered:
                     recovery_failures += 1
+                elif self._last_strategy_decision and self._last_strategy_decision.action == "retry":
+                    repaired = self._last_strategy_decision.repaired_tool_args
+                    if repaired:
+                        result.tool_args = repaired
+                    self._pending_retry = result
+                if self._last_strategy_decision and self._last_strategy_decision.action == "terminate":
+                    break
             elif result.decision == Decision.TERMINATE:
                 break
 
@@ -240,6 +348,7 @@ class AgentLoop:
                 failure_type=eval_.failure_type,
                 description=eval_.rationale,
                 step_index=result.step_index,
+                experiment_id=result.tool_args.get("experiment_id"),
             )
             self.memory.failures.append(failure)
             self.logger.log(
@@ -272,8 +381,12 @@ class AgentLoop:
                 tool_name=result.tool_name,
             )
 
+        # ── Phase and plan auto-progression based on tool success ─────────
+        self._auto_advance_phase(result)
+
         # ── Hypothesis lifecycle: update status after evaluation ───────────
         self._update_hypothesis_status(result)
+        self._update_reproduction_assessment(result)
 
     # ── Evidence recording ────────────────────────────────────────────────────
 
@@ -337,16 +450,29 @@ class AgentLoop:
         self.memory.budget.consume_experiment()
         data = result.tool_response.data
         exp_id = data.get("experiment_id", f"exp_{uuid.uuid4().hex[:8]}")
+        params = result.tool_args.get("parameters", {}) or {}
+        self._create_hypothesis(result.reasoning.hypothesis)
+        parent_id = result.tool_args.get("parent_experiment_id") or self.memory.best_experiment_id
+        if parent_id is None and self.memory.experiments:
+            parent_id = self.memory.experiments[-1].id
+        expected: dict[str, Any] = {}
+        if self.goal.target_value is not None:
+            expected[self.goal.primary_metric] = self.goal.target_value
+        if any("latency" in c.name.lower() for c in self.goal.constraints):
+            expected["latency_ms"] = 100.0
+        expected["prediction"] = result.reasoning.intended_action
 
         # Create typed Experiment object
         exp = Experiment(
             id=exp_id,
-            parent_id=result.tool_args.get("parent_experiment_id"),
+            parent_id=parent_id,
             hypothesis=result.reasoning.hypothesis,
-            parameters=result.tool_args.get("parameters", {}),
-            expected_result={"accuracy": self.goal.target_value or 0},
+            parameters=params,
+            expected_result=expected,
             git_commit=data.get("git_commit"),
+            config_fingerprint=configuration_fingerprint(result.tool_args),
         )
+        self.memory.no_progress_count = 0
 
         # Record observed result
         exp.observed_result = ExperimentResult(
@@ -361,8 +487,11 @@ class AgentLoop:
             },
         )
         exp.execution_status = ExecutionStatus.SUCCESS
+        rejected = self._is_rejected_experiment(result)
         exp.evaluation_status = (
-            EvaluationStatus.POSITIVE
+            EvaluationStatus.NEGATIVE
+            if rejected
+            else EvaluationStatus.POSITIVE
             if result.evaluation.goal_progress.value == "positive"
             else EvaluationStatus.NEGATIVE
         )
@@ -377,14 +506,25 @@ class AgentLoop:
 
         self.memory.experiments.append(exp)
         self.graph.add_node(exp)
-        self.memory.update_best(self.goal.primary_metric)
+        # Constraint-violating or regressed runs stay on the graph but must
+        # never become best_experiment_id.
+        if not rejected:
+            self.memory.update_best(self.goal.primary_metric)
 
         # Record experiment evidence
         acc = exp.observed_result.accuracy
+        latency = exp.observed_result.additional_metrics.get("latency_ms")
         if acc is not None:
+            claim = f"Experiment '{exp_id}' achieved accuracy={acc:.4f}"
+            if rejected:
+                claim = (
+                    f"Rejected experiment '{exp_id}': accuracy={acc:.4f}"
+                    + (f", latency_ms={latency}" if latency is not None else "")
+                    + f" ({result.evaluation.failure_type.value if result.evaluation.failure_type else 'constraint/regression'})"
+                )
             self.ledger.record_experiment_result(
                 memory=self.memory,
-                claim=f"Experiment '{exp_id}' achieved accuracy={acc:.4f}",
+                claim=claim,
                 experiment_id=exp_id,
                 git_commit=exp.git_commit or "",
             )
@@ -432,7 +572,28 @@ class AgentLoop:
             for h in self.memory.hypotheses:
                 if h.id == self._current_hypothesis_id:
                     h.based_on_evidence.append(f"step_{result.step_index}:{eval_status}")
+                    h.status = HypothesisLifecycle.TESTED
+                    if eval_status == "supported":
+                        h.status = HypothesisLifecycle.SUPPORTED
+                    elif eval_status == "rejected":
+                        h.status = HypothesisLifecycle.REJECTED
+                    elif eval_status == "inconclusive":
+                        h.status = HypothesisLifecycle.INCONCLUSIVE
                     break
+
+    def _update_reproduction_assessment(self, result: StepResult) -> None:
+        """Persist the stricter scientific verdict separately from metric success."""
+        facts = result.evaluation.goal_check or {}
+        reproduction = facts.get("reproduction") if isinstance(facts, dict) else None
+        if not reproduction:
+            return
+        self.memory.reproduction = ReproductionAssessment(
+            metric_success=bool(reproduction.get("metric_success", False)),
+            methodology_aligned=reproduction.get("methodology_aligned"),
+            independently_verified=reproduction.get("independently_verified"),
+            verdict=ReproductionVerdict(reproduction.get("verdict", "inconclusive")),
+            rationale=reproduction.get("rationale", ""),
+        )
 
     # ── Hypothesis lifecycle ─────────────────────────────────────────────────
 
@@ -446,41 +607,53 @@ class AgentLoop:
         self._current_hypothesis_id = h.id
         return h.id
 
+    def _is_rejected_experiment(self, result: StepResult) -> bool:
+        """True when the evaluator forbade treating this run as a legal best."""
+        ev = result.evaluation
+        if ev.decision == Decision.DIAGNOSE_AND_RECOVER:
+            return ev.failure_type in (
+                FailureType.GOAL_DRIFT,
+                FailureType.REGRESSION,
+            ) or ev.constraint_status == ConstraintStatus.VIOLATED
+        return (
+            ev.failure_type in (FailureType.GOAL_DRIFT, FailureType.REGRESSION)
+            or ev.constraint_status == ConstraintStatus.VIOLATED
+        )
+
     # ── Failure handling ─────────────────────────────────────────────────────
 
     def _handle_failure(self, result: StepResult) -> bool:
         """Dispatch a concrete recovery strategy and preserve its audit trail."""
         if not self.memory.failures or result.evaluation.failure_type is None:
             return False
-        failure = self.memory.failures[-1]
         failure_type = result.evaluation.failure_type.value
         self.logger.log(EventType.RECOVERY_STARTED, failure_type=failure_type)
-        context = RecoveryContext(
-            memory=self.memory,
-            failure=failure,
-            tool_args=result.tool_args,
-            tool_response=result.tool_response.model_dump(mode="json"),
-        )
-        # Provide checkpointer, independent evaluator, and schema repair callbacks
-        try:
-            context.checkpointer = self.registry.get("run_experiment").checkpointer
-        except (KeyError, AttributeError):
-            context.checkpointer = None
-
-        if self.registry.has("run_independent_evaluation"):
-            eval_tool = self.registry.get("run_independent_evaluation")
-            context.independent_evaluator = lambda args: eval_tool.execute(
-                eval_tool.request_model(**args) if isinstance(args, dict) else args
-            ).data
-
-        context.schema_repair = lambda args, errors: self._repair_schema_args(result.tool_name, args, errors)
-
-        outcome = self.recovery.recover(context, subtask_id=result.tool_name)
+        # Strategy owns the policy: self-correcting recovery or naive retry.
+        decision = self.strategy.handle_result(result, self.memory)
+        self._last_strategy_decision = decision
+        outcome = decision.recovery
         self.memory_store.save(self.memory)
-        self.logger.log(EventType.RECOVERY_COMPLETED, success=outcome.success, strategy=outcome.strategy, action=outcome.action_taken)
-        if not outcome.success:
-            self.logger.log(EventType.BUDGET_EXHAUSTED if outcome.strategy == "budget_exhausted" else EventType.FAILURE_DETECTED, reason=outcome.unresolved or outcome.action_taken)
-        return outcome.success
+        self.logger.log(
+            EventType.RECOVERY_COMPLETED,
+            success=decision.success,
+            strategy=outcome.strategy if outcome else decision.action,
+            action=decision.reason,
+            repaired_experiment_id=(
+                decision.repaired_tool_args.get("experiment_id")
+                if decision.repaired_tool_args
+                else None
+            ),
+        )
+        if decision.action == "recover":
+            # Get the planner off self_evaluation so the next action is a new run.
+            self._try_transition(AgentPhase.DIAGNOSING)
+            self._try_transition(AgentPhase.RECOVERING)
+            self._try_transition(AgentPhase.REPLANNING)
+            self._try_transition(AgentPhase.EXPERIMENT_PLANNING)
+            self.logger.log(EventType.REPLAN, plan_version=self.memory.plan_version, reason=decision.reason)
+        if not decision.success:
+            self.logger.log(EventType.FAILURE_DETECTED, reason=decision.reason)
+        return decision.success
 
     def _repair_schema_args(self, tool_name: str, args: dict[str, Any], errors: list[dict[str, Any]]) -> dict[str, Any]:
         """Auto-repair common schema errors using Pydantic field error feedback."""
@@ -515,18 +688,39 @@ class AgentLoop:
     # ── Utilities ────────────────────────────────────────────────────────────
 
     def _create_initial_plan(self) -> None:
-        plan = Plan(
-            steps=[
+        """Create an adaptive plan based on the goal objective."""
+        obj = self.goal.objective.lower()
+        # Goals about normalization, ablation, comparison -> direct execution path
+        direct_experiment_keywords = (
+            "normalization", "normalize", "ablation", "compare", "effect of",
+            "whether", "does", "improve", "investigate whether",
+        )
+        needs_literature = not any(kw in obj for kw in direct_experiment_keywords)
+
+        if needs_literature:
+            steps = [
                 "Search literature for relevant papers",
                 "Select best paper matching goal",
                 "Extract experimental methodology",
-                "Plan baseline reproduction experiment",
                 "Run baseline experiment",
                 "Compare results with reported values",
-                "Diagnose any discrepancies",
-                "Apply targeted fixes and re-run",
+                "Adjust methodology and re-run if needed",
                 "Generate verified final report",
-            ],
+            ]
+        else:
+            # For goals about testing a specific technique, go straight to experiments
+            steps = [
+                "Run baseline experiment without the technique",
+                "Compare baseline against target threshold",
+                "Apply the technique and re-run experiment",
+                "Compare improved result against target threshold",
+                "Generate verified final report",
+            ]
+            # Immediately skip to experiment planning phase
+            self._try_transition(AgentPhase.EXPERIMENT_PLANNING)
+
+        plan = Plan(
+            steps=steps,
             current_step_index=0,
             version=1,
         )
@@ -534,7 +728,55 @@ class AgentLoop:
         self.memory_store.save(self.memory)
         self.logger.log(EventType.PLAN_CREATED, steps=plan.steps, version=1)
 
+    def _try_transition(self, to: AgentPhase) -> None:
+        """Transition to a new phase only if the state machine allows it."""
+        if self.state_machine.can_transition(to):
+            self._transition(to)
+
+    def _auto_advance_phase(self, result: StepResult) -> None:
+        """Automatically advance plan step and agent phase based on which tool just succeeded."""
+        if not result.tool_response.success:
+            return
+
+        tool = result.tool_name
+        data = result.tool_response.data
+
+        if tool == "search_literature":
+            papers = data.get("papers", [])
+            if papers:
+                # Persist discovered papers so the planner sees them on the next step
+                existing_ids = {p.get("id") for p in self.memory.discovered_papers}
+                for p in papers:
+                    if p.get("id") not in existing_ids:
+                        self.memory.discovered_papers.append(p)
+            self.memory.current_plan.advance()
+            self._try_transition(AgentPhase.PAPER_SELECTION)
+
+        elif tool == "retrieve_paper":
+            self.memory.current_plan.advance()
+            self._try_transition(AgentPhase.METHOD_EXTRACTION)
+
+        elif tool == "extract_methodology":
+            self.memory.current_plan.advance()
+            self._try_transition(AgentPhase.EXPERIMENT_PLANNING)
+
+        elif tool == "inspect_methodology":
+            # Move forward to experiment planning so the agent runs experiments next
+            self._try_transition(AgentPhase.EXPERIMENT_PLANNING)
+
+        elif tool == "run_experiment":
+            self.memory.current_plan.advance()
+            self._try_transition(AgentPhase.SELF_EVALUATION)
+            # The evaluator is the only component allowed to set GOAL_ACHIEVED.
+            # Metric proximity with a violated constraint is goal_drift, not success.
+
+        elif tool == "compare_results":
+            # Tools return numbers and a status string; they do not close the run.
+            if data.get("status") != "REPRODUCED":
+                self.memory.current_plan.advance()
+
     def _transition(self, to: AgentPhase) -> None:
+
         from_phase = self.state_machine.current
         self.state_machine.transition(to)
         self.memory.current_phase = to.value
@@ -554,10 +796,32 @@ class AgentLoop:
         if best_acc is not None and self.goal.target_value is not None:
             gap = round(abs(self.goal.target_value - best_acc), 4)
 
+        observation = None
+        if best_result:
+            observation = {
+                self.goal.primary_metric: best_acc,
+                "latency_ms": best_result.additional_metrics.get("latency_ms"),
+                "additional_metrics": best_result.additional_metrics,
+            }
+        # Never complete on metric proximity alone. Only the evaluator's
+        # GOAL_ACHIEVED path (which already checked constraints) marks COMPLETED.
+        goal_achieved = self.state_machine.current == AgentPhase.COMPLETED
+        if (
+            not goal_achieved
+            and best_acc is not None
+            and self.goal.meets_contract(best_acc, observation)
+            and not self.memory.failures
+        ):
+            # Conservative fallback: a fully legal best with no recorded
+            # failures may close at report time. Constraint violations stay open.
+            self._try_transition(AgentPhase.GENERATING_REPORT)
+            self._try_transition(AgentPhase.COMPLETED)
+            goal_achieved = self.state_machine.current == AgentPhase.COMPLETED
+
         report = FinalReport(
             run_id=self.run_id,
             goal=self.goal.objective,
-            completed=self.state_machine.current == AgentPhase.COMPLETED,
+            completed=goal_achieved,
             total_steps=self.memory.step_count,
             experiments_run=self.memory.budget.experiments_consumed,
             self_corrections=self_corrections,
