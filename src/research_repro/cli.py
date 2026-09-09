@@ -97,7 +97,10 @@ def run(
         target_metric = "ndcg@10"
 
     # Auto-detect direction (maximize vs match)
-    is_maximize = any(kw in objective.lower() for kw in ("above", "at least", "improve", "exceed", "better than", "greater", "higher", "maximize"))
+    is_maximize = any(kw in objective.lower() for kw in (
+        "above", "at least", "improve", "exceed", "better than", "greater",
+        "higher", "highest", "maximize", "maximise",
+    ))
     direction = "maximize" if is_maximize else "match"
 
     # Build goal contract

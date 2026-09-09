@@ -25,9 +25,17 @@ from pydantic import BaseModel, ValidationError
 from ..memory.models import ResearchMemory
 from ..tools.base import ToolRegistry
 from .planning_context import (
+    assess_proposal,
+    best_observed_accuracy,
     best_valid_experiment,
     build_failure_context,
+    build_planning_evidence,
+    canonicalize_tool_args,
+    deterministic_next_parameters,
+    ensure_falsifiable_hypothesis,
+    experiment_parameters,
     rejected_configuration_rows,
+    tested_configuration_rows,
     validity_summary,
 )
 
@@ -71,25 +79,32 @@ Evaluator evidence is authoritative. You propose one typed tool call. You never
 declare success. Empty parameters {} are the sandbox DEFAULT (hidden_size=128,
 hidden_layers=2, solver=adam) — that is a real configuration, not "no choice".
 
-When a failure_context is present:
-1. Identify the exact failure_type.
+When planning_evidence or failure_context is present:
+1. Identify the exact failure_type if any.
 2. Identify which goal criteria already pass (satisfied_criteria).
-3. Identify which criterion failed (failed_criteria / violated_constraints).
-4. Identify observed vs required values.
-5. Identify parameter(s) in intervention.reduce that can affect the failed criterion.
-6. Do not repeat a previously rejected configuration (see rejected_configurations
-   and fingerprints) unless the environment or evidence has materially changed
-   and you justify the retry.
-7. Form one falsifiable hypothesis.
-8. Change the smallest meaningful set of parameters.
+3. Identify which criterion failed (failed_criteria / blocking_criterion).
+4. Identify observed vs required values from criterion_status. Do not infer this
+   solely from raw numbers; use guidance and required_change.
+5. Choose a class of intervention from interventions that attacks the blocking
+   criterion. Do not hardcode one exact configuration.
+6. Do not repeat a previously tested or rejected configuration (see
+   tested_configurations, rejected_configurations, fingerprints) unless there is
+   an explicit non-determinism reason to retry.
+7. Form one falsifiable hypothesis that cites observed evidence, the expected
+   effect, and the constraint that must remain satisfied.
+8. Change at least one experiment-affecting parameter (hidden_size, hidden_layers,
+   max_iter, lr, batch_size, normalize, pca_components, solver).
 9. Predict what should change.
 10. Select exactly one typed tool action.
 
+Use the exact tool parameter names. For learning rate the valid key is "lr",
+never "learning_rate".
+
 GOAL DRIFT: if the primary metric passes but a constraint fails, preserve the
-metric and optimize the violated constraint. Do not keep optimizing an already
-satisfied metric at the expense of the constraint. For latency violations,
-REDUCE model complexity (hidden_size and/or hidden_layers). Do not increase
-hidden_size after a latency violation.
+metric and optimize the violated constraint.
+
+ACCURACY BLOCKING: if latency already passes and accuracy fails, preserve the
+latency cap and target accuracy. Do not re-run the same low-complexity config.
 
 REGRESSION: if the current experiment is worse than best_valid_experiment, do
 not blindly retry it. Branch from the valid configuration or a new parent.
@@ -173,9 +188,9 @@ class Planner:
         raw = json.loads(content)
         raw = self._coerce_planner_output(raw)
         try:
-            return PlannerOutput(**raw)
+            output = PlannerOutput(**raw)
         except ValidationError:
-            return PlannerOutput(
+            output = PlannerOutput(
                 reasoning=ReasoningTrace(
                     goal_relevance="Advance the goal using a new experiment.",
                     evidence_basis="Planner JSON was malformed; using a conservative run_experiment.",
@@ -186,6 +201,7 @@ class Planner:
                 tool_arguments=raw if isinstance(raw.get("tool_arguments"), dict) else {"parameters": {}},
                 confidence=0.3,
             )
+        return self._finalize_output(memory, output)
 
     @staticmethod
     def _coerce_planner_output(raw: dict[str, Any]) -> dict[str, Any]:
@@ -306,10 +322,12 @@ class Planner:
             ],
             "best_experiment_id": memory.best_experiment_id,
             "best_valid_experiment": best_valid_experiment(memory),
+            "best_observed_accuracy": best_observed_accuracy(memory),
+            "planning_evidence": build_planning_evidence(memory).model_dump(mode="json"),
             "failure_context": (
-                build_failure_context(memory).model_dump(mode="json")
-                if memory.failures else None
+                ctx.model_dump(mode="json") if (ctx := build_failure_context(memory)) else None
             ),
+            "tested_configurations": tested_configuration_rows(memory),
             "rejected_configurations": rejected_configuration_rows(memory),
             "validity_summary": validity_summary(memory),
             "recent_evidence": recent_evidence,
@@ -334,14 +352,48 @@ class Planner:
             "available_tools": registry.list_available(),
         }
         if rejection_hint:
+            evidence = context["planning_evidence"]
             context["proposal_rejection"] = {
                 "blocked": True,
                 "reason": rejection_hint,
                 "instruction": (
                     "Your previous proposal was rejected and was NOT executed. "
-                    "{} is the default 128x2 Adam run and is already rejected. "
-                    "You MUST reduce hidden_size and/or hidden_layers. "
-                    "Do not repeat the rejected fingerprint."
+                    "Do not repeat a tested or rejected fingerprint. "
+                    f"required_change={evidence.get('required_change')}. "
+                    f"blocking_criterion={evidence.get('blocking_criterion')}. "
+                    f"guidance={evidence.get('guidance')}. "
+                    "Change at least one of hidden_size, hidden_layers, pca_components, "
+                    "normalize, max_iter, or lr. batch_size does not reduce parameter-count latency. "
+                    "Empty parameters {} is the already-tested default 128x2 run."
                 ),
             }
         return json.dumps(context, indent=2, default=str)
+
+    def _finalize_output(self, memory: ResearchMemory, output: PlannerOutput) -> PlannerOutput:
+        args = canonicalize_tool_args(output.tool_arguments if isinstance(output.tool_arguments, dict) else {})
+        params = experiment_parameters(args)
+        hypothesis = ensure_falsifiable_hypothesis(memory, output.reasoning.hypothesis, params)
+        evidence = build_planning_evidence(memory)
+        if not output.reasoning.evidence_basis or "see failure_context" in output.reasoning.evidence_basis.lower():
+            evidence_basis = evidence.guidance or output.reasoning.evidence_basis
+        else:
+            evidence_basis = output.reasoning.evidence_basis
+        output.tool_arguments = args
+        output.reasoning.hypothesis = hypothesis
+        output.reasoning.evidence_basis = evidence_basis
+        if output.selected_tool == "run_experiment":
+            blocked = assess_proposal(memory, output.selected_tool, args)
+            if blocked.blocked:
+                fallback = deterministic_next_parameters(memory)
+                if fallback:
+                    args["parameters"] = fallback
+                    if not args.get("experiment_id"):
+                        args["experiment_id"] = f"exp_{memory.budget.experiments_consumed + 1:02d}"
+                    output.tool_arguments = args
+                    output.reasoning.hypothesis = ensure_falsifiable_hypothesis(memory, "", fallback)
+                    output.reasoning.intended_action = f"run_experiment {fallback}"
+                    output.reasoning.evidence_basis = (
+                        evidence.guidance
+                        + " Previous proposal was blocked; selected a different intervention class from evidence."
+                    )
+        return output

@@ -16,6 +16,14 @@ from typing import Any, Callable
 from pydantic import BaseModel
 
 from .planner import Planner, PlannerOutput, ReasoningTrace
+from .planning_context import (
+    MAX_NO_PROGRESS,
+    blocking_criterion,
+    canonicalize_tool_args,
+    criteria_breakdown,
+    criterion_status_map,
+    required_change_for,
+)
 from ..evaluation.evaluator import Decision, EvaluationResult, SelfEvaluator
 from ..memory.models import ResearchMemory
 from ..observability.events import EventType
@@ -83,30 +91,19 @@ class ReactController:
         # ── 1. REASON ────────────────────────────────────────────────────────
         planner_output = self._reason(memory, step_index)
         if self.proposal_guard is not None:
-            hint = None
             for _attempt in range(2):
-                blocked = self.proposal_guard(memory, planner_output, step_index, record=False)
+                blocked = self.proposal_guard(memory, planner_output, step_index, record=True)
                 if blocked is None:
                     break
+                if memory.no_progress_count >= MAX_NO_PROGRESS or blocked.evaluation.decision == Decision.TERMINATE:
+                    return blocked
                 hint = blocked.evaluation.rationale
                 planner_output = self.planner.plan(memory, self.registry, rejection_hint=hint)
-                self.logger.log(
-                    EventType.REASON,
-                    step=step_index,
-                    hypothesis=planner_output.reasoning.hypothesis,
-                    intended_action=planner_output.reasoning.intended_action,
-                    repair_after_rejection=True,
-                )
-                self.logger.log(
-                    EventType.ACTION,
-                    step=step_index,
-                    selected_tool=planner_output.selected_tool,
-                    tool_arguments=planner_output.tool_arguments,
-                    repair_after_rejection=True,
-                )
-            blocked = self.proposal_guard(memory, planner_output, step_index, record=True)
-            if blocked is not None:
-                return blocked
+                self._log_proposal(planner_output, step_index, repair_after_rejection=True)
+            else:
+                blocked = self.proposal_guard(memory, planner_output, step_index, record=True)
+                if blocked is not None:
+                    return blocked
 
         # ── 2. ACT ───────────────────────────────────────────────────────────
         tool_response, schema_error = self._act(planner_output, step_index)
@@ -158,6 +155,10 @@ class ReactController:
 
     def _reason(self, memory: ResearchMemory, step_index: int) -> PlannerOutput:
         planner_output = self.planner.plan(memory, self.registry)
+        self._log_proposal(planner_output, step_index)
+        return planner_output
+
+    def _log_proposal(self, planner_output: PlannerOutput, step_index: int, repair_after_rejection: bool = False) -> None:
         self.logger.log(
             EventType.REASON,
             step=step_index,
@@ -166,19 +167,41 @@ class ReactController:
             hypothesis=planner_output.reasoning.hypothesis,
             intended_action=planner_output.reasoning.intended_action,
             confidence=planner_output.confidence,
+            selected_tool=planner_output.selected_tool,
+            args=planner_output.tool_arguments,
+            repair_after_rejection=repair_after_rejection,
         )
         self.logger.log(
             EventType.ACTION,
             step=step_index,
             selected_tool=planner_output.selected_tool,
             tool_arguments=planner_output.tool_arguments,
+            repair_after_rejection=repair_after_rejection,
         )
-        return planner_output
+        self.logger.log(
+            EventType.PROPOSAL_CREATED,
+            step=step_index,
+            selected_tool=planner_output.selected_tool,
+            args=planner_output.tool_arguments,
+            hypothesis=planner_output.reasoning.hypothesis,
+            intended_action=planner_output.reasoning.intended_action,
+            goal_relevance=planner_output.reasoning.goal_relevance,
+            evidence_basis=planner_output.reasoning.evidence_basis,
+            confidence=planner_output.confidence,
+        )
+        self.logger.log(
+            EventType.HYPOTHESIS_CREATED,
+            step=step_index,
+            hypothesis=planner_output.reasoning.hypothesis,
+            intended_action=planner_output.reasoning.intended_action,
+        )
 
     def _act(
         self, planner_output: PlannerOutput, step_index: int
     ) -> tuple[ToolResponse, ToolSchemaError | None]:
         tool_name = planner_output.selected_tool
+        if planner_output.selected_tool == "run_experiment":
+            planner_output.tool_arguments = canonicalize_tool_args(planner_output.tool_arguments)
         tool_args = planner_output.tool_arguments
 
         self.logger.log(
@@ -260,5 +283,25 @@ class ReactController:
             decision=evaluation.decision.value,
             confidence=evaluation.confidence,
             rationale=evaluation.rationale,
+        )
+        data = tool_response.data or {}
+        observation = {
+            memory.goal.primary_metric: data.get(memory.goal.primary_metric),
+            "accuracy": data.get("accuracy"),
+            "latency_ms": data.get("latency_ms"),
+            "additional_metrics": {"latency_ms": data.get("latency_ms")} if data.get("latency_ms") is not None else {},
+        }
+        status = criterion_status_map(memory.goal, observation)
+        sat, failed, _violated = criteria_breakdown(memory.goal, observation)
+        required, _interventions = required_change_for(memory.goal, observation)
+        self.logger.log(
+            EventType.CRITERION_EVALUATED,
+            step=step_index,
+            criterion_status=status,
+            satisfied_criteria=sat,
+            failed_criteria=failed,
+            blocking_criterion=blocking_criterion(memory.goal, observation),
+            required_change=required,
+            decision=evaluation.decision.value,
         )
         return evaluation
