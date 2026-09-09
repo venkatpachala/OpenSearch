@@ -372,6 +372,62 @@ def showcase(
     console.print(f"Selected {len(selected)} actual showcase run(s) in {output_dir}")
 
 
+@app.command()
+def benchmark(
+    goals: Path = typer.Option(Path("evaluations/goals.yaml"), "--goals"),
+    output: Path = typer.Option(Path("evaluations/results"), "--output"),
+    goal: list[str] = typer.Option(None, "--goal", help="Limit to specific goal ids"),
+    stub_tools: bool = typer.Option(False, "--stub-tools"),
+) -> None:
+    """Run the 10-goal self-correcting vs naive benchmark."""
+    import sys as _sys
+    _root = Path(__file__).resolve().parents[2]
+    if str(_root) not in _sys.path:
+        _sys.path.insert(0, str(_root))
+    from evaluations.run_benchmark import load_goals, run_one, summarize, extract_traces
+    from .config import Config
+    import json as _json
+    from datetime import datetime, timezone
+
+    config = Config.from_env()
+    selected = [g for g in load_goals(goals) if not goal or g["id"] in goal]
+    rows = []
+    for raw in selected:
+        for agent in ("self_correcting", "naive"):
+            rows.append(run_one(raw, agent, output, config, stub_tools=stub_tools))
+    result = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "stub_tools": stub_tools,
+        "execution_mode": "stub" if stub_tools else "real",
+        "denominator_note": "average_steps = total steps across all runs / total runs (failed runs included)",
+        "runs": rows,
+        "summary": summarize(rows),
+        "correction_traces": extract_traces(rows),
+    }
+    output.mkdir(parents=True, exist_ok=True)
+    dest = output / "benchmark_results.json"
+    dest.write_text(_json.dumps(result, indent=2, default=str), encoding="utf-8")
+    console.print(JSON(_json.dumps(result["summary"], indent=2, default=str)))
+    console.print(f"\nWrote {dest}")
+
+
+@app.command(name="benchmark-report")
+def benchmark_report(
+    results: Path = typer.Argument(Path("evaluations/results/benchmark_results.json")),
+    output: Path = typer.Option(Path("evaluations/results/benchmark_report.md"), "--output", "-o"),
+    stub: Path = typer.Option(None, "--stub", help="Optional stub benchmark_results.json"),
+    real: Path = typer.Option(None, "--real", help="Optional real benchmark_results.json"),
+) -> None:
+    """Render a Markdown scorecard from persisted benchmark_results.json."""
+    from .observability.benchmark_report import write_report
+    if not results.exists():
+        console.print(f"[red]Benchmark results not found: {results}[/red]")
+        raise typer.Exit(1)
+    write_report(results, output, stub_path=stub, real_path=real)
+    console.print(f"[green]Benchmark report written to {output}[/green]")
+    console.print(output.read_text(encoding="utf-8")[:4000])
+
+
 @app.command(name="chaos-benchmark")
 def chaos_benchmark(
     output_dir: Path = typer.Option(Path("runs/chaos_benchmark"), "--output-dir"),
