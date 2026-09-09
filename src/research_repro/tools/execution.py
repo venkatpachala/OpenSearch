@@ -53,12 +53,14 @@ class RealRunExperimentTool(Tool):
         self.collector = ArtifactCollector()
 
     def execute(self, request: RunExperimentRequest) -> ToolResponse:
+        from ..agent.planning_context import canonicalize_parameters
+
         output_dir = self.runner.experiment_dir(request.experiment_id)
         config = ExperimentConfig(
             experiment_id=request.experiment_id,
             script_path=self.script_path,
             output_dir=output_dir,
-            parameters=request.parameters,
+            parameters=canonicalize_parameters(request.parameters or {}),
             timeout_seconds=request.timeout_seconds,
             seed=request.seed,
         )
@@ -270,6 +272,8 @@ class RunIndependentEvalTool(Tool):
             training_accuracy=eval_metrics.get("training_accuracy"),
             discrepancy=eval_metrics.get("discrepancy"),
             consistent=eval_metrics.get("consistent"),
+            independently_verified=eval_metrics.get("independently_verified"),
+            limitation=eval_metrics.get("limitation"),
             eval_metrics=eval_metrics,
         )
 

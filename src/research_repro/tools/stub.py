@@ -307,6 +307,32 @@ class RunExperimentTool(Tool):
 # ---------------------------------------------------------------------------
 
 
+class RunIndependentEvalRequest(ToolRequest):
+    experiment_id: str
+    timeout_seconds: int = 120
+    seed: int = 1042
+
+
+class StubIndependentEvalTool(Tool):
+    name = "run_independent_evaluation"
+    description = (
+        "Re-score a completed experiment independently. Stub mode does not "
+        "fabricate metrics; it reports that model artifacts are unavailable."
+    )
+    request_model = RunIndependentEvalRequest
+
+    def execute(self, request: RunIndependentEvalRequest) -> ToolResponse:
+        return ToolResponse.ok(
+            experiment_id=request.experiment_id,
+            eval_accuracy=None,
+            training_accuracy=None,
+            discrepancy=None,
+            consistent=None,
+            independently_verified=False,
+            limitation="Stub independent evaluation does not re-score a trained model",
+        )
+
+
 class CollectMetricsRequest(ToolRequest):
     experiment_id: str
     metric_names: list[str] = ["accuracy", "f1", "loss", "ndcg@10", "improvement_pct"]
@@ -453,4 +479,5 @@ def build_stub_registry() -> ToolRegistry:
     registry.register(CollectMetricsTool())
     registry.register(CompareResultsTool())
     registry.register(InspectMethodologyTool())
+    registry.register(StubIndependentEvalTool())
     return registry

@@ -36,14 +36,27 @@ class ExperimentConfig:
 
     def to_args(self) -> list[str]:
         """Convert parameters dict to CLI args for the training script."""
+        from ..agent.planning_context import (
+            VALID_EXPERIMENT_PARAMS,
+            alias_key,
+            canonicalize_parameters,
+            cli_flag_for,
+        )
+
         args = [
             self.python_executable,
             str(self.script_path),
             "--output-dir", str(self.output_dir),
             "--seed", str(self.seed),
         ]
-        for key, value in self.parameters.items():
-            cli_key = f"--{key.replace('_', '-')}"
+        params = canonicalize_parameters(self.parameters)
+        for key, value in params.items():
+            mapped = alias_key(key)
+            if mapped not in VALID_EXPERIMENT_PARAMS:
+                continue
+            if mapped in {"seed"}:
+                continue
+            cli_key = cli_flag_for(mapped)
             if isinstance(value, bool):
                 if value:
                     args.append(cli_key)
