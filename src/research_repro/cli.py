@@ -46,7 +46,7 @@ def run(
         None, "--target-value", help="Target metric value (e.g. 0.942)"
     ),
     success_threshold: float = typer.Option(
-        1.0, "--threshold", help="Acceptable deviation from target (same units)"
+        0.02, "--threshold", help="Acceptable metric tolerance for reproduction (same units)"
     ),
     constraint: list[str] = typer.Option(
         [], "--constraint", "-c", help="Add constraint (e.g. 'latency_under_100ms')"
@@ -81,7 +81,7 @@ def run(
 ) -> None:
     """Start a new research reproduction run."""
     from .config import Config
-    from .memory.models import Constraint, GoalContract, ResourceBudget
+    from .memory.models import Constraint, GoalContract, MetricCriterion, ResourceBudget
     from .agent.loop import AgentLoop
 
     config = Config.from_env()
@@ -96,6 +96,10 @@ def run(
     if is_rag_objective and target_metric == "accuracy":
         target_metric = "ndcg@10"
 
+    # Auto-detect direction (maximize vs match)
+    is_maximize = any(kw in objective.lower() for kw in ("above", "at least", "improve", "exceed", "better than", "greater", "higher", "maximize"))
+    direction = "maximize" if is_maximize else "match"
+
     # Build goal contract
     constraints = [Constraint(name=c, description=c) for c in constraint]
     goal = GoalContract(
@@ -103,6 +107,16 @@ def run(
         primary_metric=target_metric,
         target_value=target_value,
         success_threshold=success_threshold,
+        criterion=(
+            MetricCriterion(
+                metric=target_metric,
+                direction=direction,
+                target=target_value,
+                tolerance=success_threshold,
+                minimum=(target_value - success_threshold) if direction == "maximize" and target_value is not None else None,
+            )
+            if target_value is not None else None
+        ),
         constraints=constraints,
         max_experiments=max_experiments,
         allowed_resources=ResourceBudget(
@@ -124,13 +138,9 @@ def run(
         console.print("[green]✓ Dry run complete — goal contract parsed successfully.[/green]")
         raise typer.Exit()
 
-    # Validate tool mode
-    if not stub_tools and not real_tools:
-        console.print(
-            "[yellow]Hint: Use --stub-tools (fast, no ML) or --real-tools (runs real subprocess).[/yellow]\n"
-            "Defaulting to --stub-tools."
-        )
-        stub_tools = True
+    # Default to real execution tools unless explicitly requested otherwise
+    if not stub_tools:
+        real_tools = True
 
     # Check API key if using cloud OpenAI endpoint (not needed for localhost Ollama)
     is_local = "localhost" in config.llm_base_url or "127.0.0.1" in config.llm_base_url or "ollama" in config.llm_base_url
@@ -316,6 +326,47 @@ def status(
         f"{budget.get('recoveries_consumed', 0)}/{resources.get('max_total_recoveries', '?')}"
     )
     console.print()
+
+
+@app.command()
+def replay(
+    run: Path = typer.Argument(..., help="Run directory or run.jsonl path"),
+    failures: bool = typer.Option(False, "--failures", help="Show failure-focused events only"),
+    recoveries: bool = typer.Option(False, "--recoveries", help="Show recovery-focused events only"),
+) -> None:
+    """Replay actual persisted JSONL events."""
+    from .observability.replay import replay_text
+    path = run if run.exists() else Path("runs") / run / "run.jsonl"
+    if not path.exists():
+        console.print(f"[red]Run log not found: {path}[/red]")
+        raise typer.Exit(1)
+    console.print(replay_text(path, failures_only=failures, recoveries_only=recoveries))
+
+
+@app.command()
+def report(
+    run: Path = typer.Argument(..., help="Run directory or run ID"),
+    output: Path = typer.Option(Path("report.md"), "--output", "-o"),
+) -> None:
+    """Generate Markdown or HTML from actual run artifacts."""
+    from .observability.report import ReportGenerator
+    run_dir = run if run.is_dir() else Path("runs") / run
+    if not (run_dir / "memory.json").exists():
+        console.print(f"[red]Run memory not found: {run_dir / 'memory.json'}[/red]")
+        raise typer.Exit(1)
+    ReportGenerator(run_dir).write(output)
+    console.print(f"[green]Report written to {output}[/green]")
+
+
+@app.command()
+def showcase(
+    benchmark_results: Path = typer.Argument(..., help="Actual benchmark_results.json"),
+    output_dir: Path = typer.Option(Path("runs/showcase"), "--output-dir"),
+) -> None:
+    """Copy only actual runs containing successful recovery events into showcase/."""
+    from .observability.showcase import select_showcase
+    selected = select_showcase(benchmark_results, output_dir)
+    console.print(f"Selected {len(selected)} actual showcase run(s) in {output_dir}")
 
 
 @app.command(name="chaos-benchmark")
