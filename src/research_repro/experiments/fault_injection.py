@@ -79,23 +79,42 @@ class FaultInjectingRunner:
         self.default_mode = default_mode
         # Track which experiments have already failed once (for FAIL_ONCE)
         self._failed_once: set[str] = set()
+        self._call_index = 0
+
+    def allocate_experiment_id(self, requested: str | None = None) -> str:
+        return self.base_runner.allocate_experiment_id(requested)
 
     def run(self, config: ExperimentConfig) -> ExecutionResult:
         """Run the experiment, applying the configured fault mode."""
-        mode = self.fault_schedule.get(config.experiment_id, self.default_mode)
-
+        self._call_index += 1
+        mode = self._resolve_mode(config)
         if mode == FaultMode.FAIL_ONCE:
             return self._inject_fail_once(config)
-        elif mode == FaultMode.TIMEOUT:
+        if mode == FaultMode.TIMEOUT:
             return self._inject_timeout(config)
-        elif mode == FaultMode.CORRUPT_METRIC:
+        if mode == FaultMode.CORRUPT_METRIC:
             return self._inject_corrupt_metric(config)
-        elif mode == FaultMode.WRONG_RESULT:
+        if mode == FaultMode.WRONG_RESULT:
             return self._inject_wrong_result(config)
-        elif mode == FaultMode.MISSING_METRICS:
+        if mode == FaultMode.MISSING_METRICS:
             return self._inject_missing_metrics(config)
-        else:
-            return self.base_runner.run(config)
+        return self.base_runner.run(config)
+
+    def _resolve_mode(self, config: ExperimentConfig) -> FaultMode:
+        first_aliases = {
+            "1", "exp_01", "exp_1", "baseline_experiment_1",
+            "baseline_experiment_001", "experiment_001",
+        }
+        schedule = {str(k): v for k, v in self.fault_schedule.items()}
+        if config.experiment_id in self.fault_schedule:
+            return self.fault_schedule[config.experiment_id]
+        if str(self._call_index) in schedule:
+            return schedule[str(self._call_index)]
+        if self._call_index == 1:
+            for alias in first_aliases:
+                if alias in schedule:
+                    return schedule[alias]
+        return self.default_mode
 
     def collect_metrics(self, result: ExecutionResult) -> dict[str, Any]:
         return self.base_runner.collect_metrics(result)

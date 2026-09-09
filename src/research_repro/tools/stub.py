@@ -279,16 +279,25 @@ class RunExperimentTool(Tool):
                 },
             )
 
-        # Image classification fallback
-        has_normalize = "normalize" in params_str
-        has_cosine = "cosine" in params_str
+        # Image classification fallback — complexity-aware latency proxy
+        from ..agent.planning_context import canonicalize_parameters, normalize_parameters
 
-        accuracy = 0.867
+        params = normalize_parameters(canonicalize_parameters(request.parameters or {}))
+        has_normalize = bool(params.get("normalize")) or "normalize" in params_str
+        has_cosine = "cosine" in params_str
+        hidden = int(params.get("hidden_size") or 128)
+        layers = int(params.get("hidden_layers") or 2)
+        complexity = hidden * layers
+        if complexity >= 256:
+            accuracy, latency_ms = 0.961, 156.9
+        elif hidden >= 128:
+            accuracy, latency_ms = 0.9515, 137.1
+        else:
+            accuracy, latency_ms = 0.9125, 76.1
         if has_normalize:
-            accuracy += 0.042
+            accuracy = min(0.97, round(accuracy + 0.045, 4))
         if has_cosine:
-            accuracy += 0.031
-        accuracy = min(accuracy, 0.942)
+            accuracy = min(0.97, round(accuracy + 0.01, 4))
 
         return ToolResponse.ok(
             experiment_id=request.experiment_id,
@@ -296,9 +305,10 @@ class RunExperimentTool(Tool):
             f1=round(accuracy - 0.005, 4),
             loss=round(0.42 - (accuracy - 0.867) * 0.5, 4),
             runtime_seconds=12.3,
+            latency_ms=latency_ms,
             artifacts=[f"runs/{request.experiment_id}/model.pt"],
-            stdout_summary=f"Epoch 200/200 — acc: {accuracy:.4f}",
-            metrics={"accuracy": round(accuracy, 4)},
+            stdout_summary=f"Epoch 200/200 — acc: {accuracy:.4f} latency_ms={latency_ms}",
+            metrics={"accuracy": round(accuracy, 4), "latency_ms": latency_ms},
         )
 
 
@@ -328,7 +338,7 @@ class StubIndependentEvalTool(Tool):
             training_accuracy=None,
             discrepancy=None,
             consistent=None,
-            independently_verified=False,
+            independently_verified=None,
             limitation="Stub independent evaluation does not re-score a trained model",
         )
 

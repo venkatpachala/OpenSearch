@@ -176,18 +176,25 @@ def run_experiment(args: argparse.Namespace) -> dict:
 
     total_time = time.monotonic() - start
 
-    # Simulate latency (proportional to model complexity)
+    # Environment-defined computational-cost proxy (NOT measured serving latency).
+    # Constraint comparisons use this same definition for every configuration.
     n_params = sum(
         w.size for w in model.coefs_
     ) + sum(b.size for b in model.intercepts_)
     simulated_latency_ms = round(n_params / 10000 * 12.0 + 15.0, 1)
+    sample = X_test[: min(32, len(X_test))]
+    t_inf = time.perf_counter()
+    for _ in range(8):
+        model.predict(sample)
+    inference_ms = round((time.perf_counter() - t_inf) / 8 * 1000.0, 3)
 
     print(f"\n{'='*50}")
     print(f"Test Accuracy:  {accuracy:.4f} ({accuracy*100:.2f}%)")
     print(f"Test F1:        {f1:.4f}")
     print(f"Train Accuracy: {train_accuracy:.4f}")
     print(f"Runtime:        {total_time:.1f}s")
-    print(f"Latency (sim):  {simulated_latency_ms}ms")
+    print(f"Latency (cost proxy, not serving latency):  {simulated_latency_ms}ms")
+    print(f"Inference batch timing (informational):     {inference_ms}ms")
     print(f"{'='*50}")
 
     output_dir = Path(args.output_dir)
@@ -223,6 +230,8 @@ def run_experiment(args: argparse.Namespace) -> dict:
         "iterations": actual_iters,
         "n_params": n_params,
         "latency_ms": simulated_latency_ms,
+        "latency_definition": "environment-defined computational-cost proxy, not measured serving latency",
+        "inference_ms": inference_ms,
         "config": {
             "normalize": args.normalize,
             "solver": args.solver,

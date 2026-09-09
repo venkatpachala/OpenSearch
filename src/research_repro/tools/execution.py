@@ -9,6 +9,7 @@ and collect real metrics from the subprocess output.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -53,20 +54,39 @@ class RealRunExperimentTool(Tool):
         self.collector = ArtifactCollector()
 
     def execute(self, request: RunExperimentRequest) -> ToolResponse:
-        from ..agent.planning_context import canonicalize_parameters
+        from ..agent.planning_context import canonicalize_parameters, normalize_parameters
 
-        output_dir = self.runner.experiment_dir(request.experiment_id)
+        requested = request.experiment_id
+        allocator = getattr(self.runner, "allocate_experiment_id", None)
+        experiment_id = allocator(requested) if callable(allocator) else requested
+        output_dir = self.runner.experiment_dir(experiment_id)
+        canonical = normalize_parameters(canonicalize_parameters(request.parameters or {}))
         config = ExperimentConfig(
-            experiment_id=request.experiment_id,
+            experiment_id=experiment_id,
             script_path=self.script_path,
             output_dir=output_dir,
-            parameters=canonicalize_parameters(request.parameters or {}),
+            parameters=canonical,
             timeout_seconds=request.timeout_seconds,
             seed=request.seed,
         )
 
         result = self.runner.run(config)
-        artifacts = self.collector.collect(request.experiment_id, output_dir)
+        artifacts = self.collector.collect(experiment_id, output_dir)
+        hypothesis_path = output_dir / "hypothesis.json"
+        if not hypothesis_path.exists():
+            hypothesis_path.write_text(
+                json.dumps(
+                    {
+                        "hypothesis": getattr(request, "hypothesis", None),
+                        "requested_experiment_id": requested,
+                        "experiment_id": experiment_id,
+                        "canonical_configuration": canonical,
+                    },
+                    indent=2,
+                    default=str,
+                ),
+                encoding="utf-8",
+            )
 
         if result.timed_out:
             return ToolResponse.fail(
@@ -89,12 +109,13 @@ class RealRunExperimentTool(Tool):
         commit_hash = None
         if self.checkpointer is not None:
             commit_hash = self.checkpointer.checkpoint(
-                experiment_id=request.experiment_id,
-                message=f"Experiment {request.experiment_id} completed",
+                experiment_id=experiment_id,
+                message=f"Experiment {experiment_id} completed",
             )
 
         return ToolResponse.ok(
-            experiment_id=request.experiment_id,
+            experiment_id=experiment_id,
+            requested_experiment_id=requested,
             accuracy=artifacts.get_metric("accuracy"),
             f1=artifacts.get_metric("f1"),
             loss=artifacts.get_metric("loss"),
