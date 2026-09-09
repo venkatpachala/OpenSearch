@@ -27,12 +27,17 @@ class EventType(str, Enum):
     TOOL_RESULT = "tool_result"
     OBSERVATION = "observation"
     SELF_EVALUATION = "self_evaluation"
+    PROPOSAL_CREATED = "proposal_created"
+    PROPOSAL_BLOCKED = "proposal_blocked"
+    HYPOTHESIS_CREATED = "hypothesis_created"
+    CRITERION_EVALUATED = "criterion_evaluated"
 
     # Failure & recovery
     TOOL_SCHEMA_ERROR = "tool_schema_error"
     FAILURE_DETECTED = "failure_detected"
     RECOVERY_STARTED = "recovery_started"
     RECOVERY_COMPLETED = "recovery_completed"
+    ACTION_REPAIRED = "action_repaired"
     REPLAN = "replan"
     NO_PROGRESS = "no_progress"
 
@@ -50,6 +55,7 @@ class EventType(str, Enum):
 
     # Goal achievement
     GOAL_ACHIEVED = "goal_achieved"
+    CAMPAIGN_TERMINATED = "campaign_terminated"
 
     # Terminal
     FINAL_REPORT = "final_report"
