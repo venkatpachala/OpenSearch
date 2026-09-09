@@ -3,17 +3,19 @@
 
 goals:
   - id: G01
-    objective: "Reproduce baseline image classification experiment on CIFAR-10"
+    objective: "Reproduce baseline image classification experiment on MNIST"
     primary_metric: accuracy
     target_value: 0.942
-    success_threshold: 0.5
+    success_threshold: 0.02
+    criterion: {metric: accuracy, direction: match, target: 0.942, tolerance: 0.02}
     constraints: ["public_dataset_only"]
 
   - id: G02
     objective: "Reproduce data augmentation experiment and verify reported accuracy improvement"
     primary_metric: accuracy
     target_value: 0.920
-    success_threshold: 0.5
+    success_threshold: 0.02
+    criterion: {metric: accuracy, direction: match, target: 0.920, tolerance: 0.02}
     constraints: ["public_dataset_only"]
 
   - id: G03
@@ -21,53 +23,64 @@ goals:
     primary_metric: f1
     target_value: 0.91
     success_threshold: 0.02
+    criterion: {metric: f1, direction: match, target: 0.91, tolerance: 0.02}
     constraints: ["public_dataset_only"]
 
   - id: G04
     objective: "Reproduce optimizer comparison experiment (SGD vs Adam)"
     primary_metric: accuracy
     target_value: 0.895
-    success_threshold: 1.0
+    success_threshold: 0.02
+    criterion: {metric: accuracy, direction: match, target: 0.895, tolerance: 0.02}
     constraints: ["public_dataset_only"]
 
   - id: G05
     objective: "Reproduce learning rate schedule comparison (step vs cosine)"
     primary_metric: accuracy
     target_value: 0.930
-    success_threshold: 1.0
+    success_threshold: 0.02
+    criterion: {metric: accuracy, direction: match, target: 0.930, tolerance: 0.02}
     constraints: ["public_dataset_only"]
 
   - id: G06
     objective: "Reproduce weight decay ablation experiment"
     primary_metric: accuracy
     target_value: 0.910
-    success_threshold: 1.0
+    success_threshold: 0.02
+    criterion: {metric: accuracy, direction: match, target: 0.910, tolerance: 0.02}
     constraints: ["public_dataset_only"]
 
   - id: G07
     objective: "Handle and resolve preprocessing discrepancy from paper"
     primary_metric: accuracy
     target_value: 0.935
-    success_threshold: 1.0
+    success_threshold: 0.02
+    criterion: {metric: accuracy, direction: match, target: 0.935, tolerance: 0.02}
     constraints: ["public_dataset_only"]
 
   - id: G08
     objective: "Run experiment with intentionally broken experiment runner and recover"
     primary_metric: accuracy
     target_value: 0.880
-    success_threshold: 2.0
+    success_threshold: 0.02
+    criterion: {metric: accuracy, direction: match, target: 0.880, tolerance: 0.02}
+    fault_mode: fail_once
     constraints: ["public_dataset_only"]
 
   - id: G09
     objective: "Detect and resolve metric inconsistency between training and evaluation"
     primary_metric: accuracy
     target_value: 0.900
-    success_threshold: 1.5
+    success_threshold: 0.02
+    criterion: {metric: accuracy, direction: match, target: 0.900, tolerance: 0.02}
+    fault_mode: corrupt_metric
     constraints: ["public_dataset_only"]
 
   - id: G10
     objective: "Reproduce experiment while satisfying strict latency constraint"
     primary_metric: accuracy
     target_value: 0.880
-    success_threshold: 2.0
+    success_threshold: 0.02
+    criterion: {metric: accuracy, direction: match, target: 0.880, tolerance: 0.02}
+    fault_mode: wrong_result
     constraints: ["public_dataset_only", "latency_under_100ms"]

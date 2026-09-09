@@ -41,7 +41,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hidden-layers", type=int, default=2, help="Number of hidden layers")
 
     # Training
-    p.add_argument("--max-iter", type=int, default=50, help="Max training iterations")
+    p.add_argument("--max-iter", type=int, default=100, help="Max training iterations (default 100; use 200 for best results with normalize)")
+
     p.add_argument("--lr", type=float, default=0.001, help="Learning rate (Adam)")
     p.add_argument("--batch-size", type=int, default=200, help="Mini-batch size")
 
@@ -64,7 +65,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_data(seed: int):
-    """Load MNIST. Falls back to synthetic data if download fails."""
+    """Load the real MNIST dataset; fail loudly if it cannot be retrieved."""
     try:
         from sklearn.datasets import fetch_openml
         print("Loading MNIST dataset...")
@@ -73,56 +74,10 @@ def load_data(seed: int):
         print(f"Dataset loaded: {X.shape[0]} samples, {X.shape[1]} features")
         return X, y
     except Exception as e:
-        print(f"Warning: Could not load MNIST ({e}). Using synthetic data.")
-        return _make_synthetic(seed)
-
-
-def _make_synthetic(seed: int):
-    """
-    Generate realistic synthetic classification data.
-
-    Designed so that:
-      - Baseline (no normalize, raw /255 scaling): ~87-90% accuracy
-      - With StandardScaler normalization:          ~93-96% accuracy
-      - With normalization + better solver:         ~95-97% accuracy
-
-    This accurately simulates the self-correction loop even without
-    the real MNIST dataset, and all without needing pandas or internet.
-    """
-    import numpy as np
-    rng = np.random.RandomState(seed)
-
-    n_classes = 10
-    n_features = 784
-    samples_per_class = 1400   # 14000 total
-    noise_std = 1.8            # Overlapping clusters — not trivially separable
-
-    X_parts, y_parts = [], []
-    for c in range(n_classes):
-        # Class-specific mean in a low-dimensional subspace
-        center = np.zeros(n_features)
-        # Each class activates a different band of features
-        band_start = c * 70
-        band_end = band_start + 140  # 140-feature wide band
-        center[band_start:band_end] = rng.uniform(1.5, 3.0, band_end - band_start)
-        # Overlap: adjacent classes share some features
-        if c > 0:
-            center[(c - 1) * 70: c * 70] = rng.uniform(0.3, 0.8, 70)
-
-        # Generate samples with additive noise
-        X_class = center + rng.randn(samples_per_class, n_features) * noise_std
-        # Scale to mimic pixel range [0, 255] (important for the normalize fix to matter)
-        X_class = np.clip(X_class * 40 + 128, 0, 255)
-        y_class = np.full(samples_per_class, str(c))
-        X_parts.append(X_class)
-        y_parts.append(y_class)
-
-    X = np.vstack(X_parts).astype("float32")
-    y = np.concatenate(y_parts)
-
-    # Shuffle
-    idx = rng.permutation(len(X))
-    return X[idx], y[idx]
+        raise RuntimeError(
+            "Real MNIST retrieval failed; refusing to substitute synthetic data. "
+            "Check network access or pre-cache MNIST before running the benchmark."
+        ) from e
 
 
 def run_experiment(args: argparse.Namespace) -> dict:
@@ -140,23 +95,19 @@ def run_experiment(args: argparse.Namespace) -> dict:
     X, y = load_data(args.seed)
     X = X.astype("float32")
 
-    # Subsample for speed (use 12k train, 2k test)
+    # Subsample for speed (use 20k train, 2k test)
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=2000, train_size=min(12000, len(X) - 2000),
+        X, y, test_size=2000, train_size=min(20000, len(X) - 2000),
         random_state=args.seed, stratify=y if len(np.unique(y)) > 1 else None
     )
 
     # ── 2. Preprocessing ──────────────────────────────────────────────────────
     if args.normalize:
-        print("Applying StandardScaler normalization...")
-        scaler = StandardScaler()
-        X_train = scaler.fit_transform(X_train)
-        X_test = scaler.transform(X_test)
-    else:
-        # Baseline: just scale to [0, 1] range
+        print("Applying input normalization ([0, 1] scaling)...")
         X_train = X_train / 255.0
         X_test = X_test / 255.0
-        print("Using basic [0,1] scaling (no StandardScaler)")
+    else:
+        print("Using unnormalized raw [0, 255] pixel values (baseline)")
 
     if args.pca_components > 0:
         from sklearn.decomposition import PCA
