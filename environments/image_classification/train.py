@@ -60,12 +60,22 @@ def parse_args() -> argparse.Namespace:
     # Constraint metric simulation
     p.add_argument("--latency-budget-ms", type=float, default=100.0,
                    help="Simulated latency budget in ms (affects model complexity penalty)")
+    p.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="Use synthetic digits instead of MNIST. Test/stub mode only; never used by the agent.",
+    )
 
     return p.parse_args()
 
 
-def load_data(seed: int):
-    """Load the real MNIST dataset; fail loudly if it cannot be retrieved."""
+def load_data(seed: int, synthetic: bool = False):
+    """Load MNIST, or synthetic data only when explicitly requested."""
+    if synthetic:
+        from sklearn.datasets import load_digits
+        print("WARNING: --synthetic is test/stub mode; not a production MNIST run.")
+        digits = load_digits()
+        return digits.data, digits.target
     try:
         from sklearn.datasets import fetch_openml
         print("Loading MNIST dataset...")
@@ -75,8 +85,9 @@ def load_data(seed: int):
         return X, y
     except Exception as e:
         raise RuntimeError(
-            "Real MNIST retrieval failed; refusing to substitute synthetic data. "
-            "Check network access or pre-cache MNIST before running the benchmark."
+            "MNIST unavailable; explicit environment/data failure. "
+            "Refusing to substitute synthetic data during a real run. "
+            "Pass --synthetic only in unit tests, or pre-cache MNIST."
         ) from e
 
 
@@ -92,12 +103,19 @@ def run_experiment(args: argparse.Namespace) -> dict:
     start = time.monotonic()
 
     # ── 1. Load data ──────────────────────────────────────────────────────────
-    X, y = load_data(args.seed)
+    X, y = load_data(args.seed, synthetic=bool(getattr(args, "synthetic", False)))
     X = X.astype("float32")
 
-    # Subsample for speed (use 20k train, 2k test)
+    # Subsample for speed on full MNIST; keep a usable split for tiny synthetic sets.
+    n = len(X)
+    if n > 4000:
+        test_size = 2000
+        train_size = min(20000, n - test_size)
+    else:
+        test_size = max(1, n // 5)
+        train_size = n - test_size
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=2000, train_size=min(20000, len(X) - 2000),
+        X, y, test_size=test_size, train_size=train_size,
         random_state=args.seed, stratify=y if len(np.unique(y)) > 1 else None
     )
 
@@ -171,6 +189,29 @@ def run_experiment(args: argparse.Namespace) -> dict:
     print(f"Runtime:        {total_time:.1f}s")
     print(f"Latency (sim):  {simulated_latency_ms}ms")
     print(f"{'='*50}")
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        import joblib
+        import numpy as np
+        joblib.dump(
+            {
+                "model": model,
+                "normalize": bool(args.normalize),
+                "pca_components": int(args.pca_components),
+                "hidden_size": int(args.hidden_size),
+                "hidden_layers": int(args.hidden_layers),
+            },
+            output_dir / "model.joblib",
+        )
+        X_test_out = np.asarray(X_test, dtype=np.float32)
+        y_test_out = np.asarray(y_test)
+        if y_test_out.dtype == object:
+            y_test_out = y_test_out.astype(str)
+        np.savez_compressed(output_dir / "eval_split.npz", X_test=X_test_out, y_test=y_test_out)
+    except Exception as exc:
+        print(f"WARNING: could not persist model artifacts for independent eval: {exc}")
 
     return {
         "accuracy": round(accuracy, 4),

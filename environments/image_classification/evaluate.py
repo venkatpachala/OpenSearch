@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """
-Independent Evaluator — runs evaluation separately from training.
+Independent Evaluator — re-scores persisted training artifacts.
 
-The self-evaluator calls this script to independently verify reported
-training metrics. If this script's results disagree significantly with
-what the training script reported, it triggers a RESULT_INCONSISTENCY
-failure (Failure Type 3).
-
-Usage:
-  python evaluate.py --model-dir runs/exp_001 --output-dir runs/exp_001/eval
+Loads the saved model and holdout split written by train.py and computes
+metrics in a separate process. Does not add noise and does not invent scores.
+If artifacts are missing, fail honestly.
 """
 from __future__ import annotations
 
@@ -32,46 +28,81 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load the training metrics
     metrics_path = model_dir / "metrics.json"
+    model_path = model_dir / "model.joblib"
+    split_path = model_dir / "eval_split.npz"
+
     if not metrics_path.exists():
         print("ERROR: metrics.json not found", file=sys.stderr)
         return 1
-
     try:
         training_metrics = json.loads(metrics_path.read_text())
     except Exception as e:
         print(f"ERROR reading metrics: {e}", file=sys.stderr)
         return 1
 
-    # Independent evaluation: re-load data and re-score
-    # In a real system this would reload the saved model.
-    # Here we simulate a slight measurement noise to show independence.
-    import numpy as np
-    rng = np.random.RandomState(args.seed + 1000)  # different seed from training
+    reported_accuracy = training_metrics.get("accuracy")
+    if not model_path.exists() or not split_path.exists():
+        payload = {
+            "eval_accuracy": None,
+            "training_accuracy": reported_accuracy,
+            "discrepancy": None,
+            "consistent": None,
+            "independently_verified": False,
+            "limitation": (
+                "Independent evaluation artifacts (model.joblib / eval_split.npz) "
+                "are missing; refusing to fabricate verification metrics."
+            ),
+        }
+        (output_dir / "eval_metrics.json").write_text(json.dumps(payload, indent=2))
+        print(payload["limitation"], file=sys.stderr)
+        return 1
 
-    reported_accuracy = training_metrics.get("accuracy", 0.0)
-    reported_f1 = training_metrics.get("f1", 0.0)
+    try:
+        import joblib
+        import numpy as np
+        from sklearn.metrics import accuracy_score, f1_score
+    except Exception as e:
+        print(f"ERROR importing evaluation dependencies: {e}", file=sys.stderr)
+        return 1
 
-    # Add small measurement noise (simulates separate evaluation run)
-    noise = rng.normal(0, 0.002)
-    eval_accuracy = float(np.clip(reported_accuracy + noise, 0.0, 1.0))
-    eval_f1 = float(np.clip(reported_f1 + noise * 0.8, 0.0, 1.0))
+    try:
+        bundle = joblib.load(model_path)
+        model = bundle["model"] if isinstance(bundle, dict) else bundle
+        split = np.load(split_path, allow_pickle=True)
+        X_test = split["X_test"]
+        y_test = split["y_test"]
+        y_pred = model.predict(X_test)
+        eval_accuracy = float(accuracy_score(y_test, y_pred))
+        eval_f1 = float(f1_score(y_test, y_pred, average="weighted", zero_division=0))
+    except Exception as e:
+        print(f"ERROR during independent re-score: {e}", file=sys.stderr)
+        payload = {
+            "eval_accuracy": None,
+            "training_accuracy": reported_accuracy,
+            "discrepancy": None,
+            "consistent": None,
+            "independently_verified": False,
+            "limitation": f"Independent evaluation failed: {e}",
+        }
+        (output_dir / "eval_metrics.json").write_text(json.dumps(payload, indent=2))
+        return 1
 
+    discrepancy = None if reported_accuracy is None else abs(eval_accuracy - float(reported_accuracy))
     eval_metrics = {
         "eval_accuracy": round(eval_accuracy, 4),
         "eval_f1": round(eval_f1, 4),
         "training_accuracy": reported_accuracy,
-        "discrepancy": round(abs(eval_accuracy - reported_accuracy), 4),
-        "consistent": abs(eval_accuracy - reported_accuracy) < 0.01,
+        "discrepancy": None if discrepancy is None else round(discrepancy, 4),
+        "consistent": discrepancy is not None and discrepancy < 0.01,
+        "independently_verified": True,
+        "n_eval_samples": int(len(y_test)),
     }
 
-    (output_dir / "eval_metrics.json").write_text(
-        json.dumps(eval_metrics, indent=2)
-    )
+    (output_dir / "eval_metrics.json").write_text(json.dumps(eval_metrics, indent=2))
     print(f"Eval accuracy: {eval_accuracy:.4f}")
-    print(f"Training reported: {reported_accuracy:.4f}")
-    print(f"Discrepancy: {eval_metrics['discrepancy']:.4f}")
+    print(f"Training reported: {reported_accuracy}")
+    print(f"Discrepancy: {eval_metrics['discrepancy']}")
     print(f"Consistent: {eval_metrics['consistent']}")
     return 0
 
