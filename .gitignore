@@ -18,3 +18,17 @@ build/
 
 # Run output logs
 runs/
+
+# docs
+FINAL_EVALUATION.md
+FINAL_IMPLEMENTATION.md
+IMPLEMENTATION_NOW.md
+
+# Model and data binaries
+*.joblib
+*.npz
+*.pt
+
+# Benchmark run directories (keep scorecard and summary json)
+evaluations/results/G*/
+evaluations/results_real/G*/

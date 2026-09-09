@@ -1,86 +1,133 @@
-# 10 evaluation goals for benchmarking agent performance
-# Format: id, objective, primary_metric, target_value, success_threshold, constraints
+# 10 evaluation goals covering distinct agent behaviors.
+# Each goal is executable by the current MNIST image-classification environment.
 
 goals:
   - id: G01
-    objective: "Reproduce baseline image classification experiment on MNIST"
+    description: "Accuracy under a hard latency constraint"
+    objective: "Find a configuration for the existing MNIST image-classification experiment that achieves the highest possible test accuracy while keeping latency below 100 ms. Start from the default configuration."
     primary_metric: accuracy
-    target_value: 0.942
-    success_threshold: 0.02
-    criterion: {metric: accuracy, direction: match, target: 0.942, tolerance: 0.02}
-    constraints: ["public_dataset_only"]
+    target_value: 0.95
+    success_threshold: 0.0
+    criterion: {metric: accuracy, direction: maximize, target: 0.95, tolerance: 0.0, minimum: 0.95}
+    constraints: ["latency_under_100ms"]
+    budget: {max_experiments: 6, max_total_recoveries: 6, max_recoveries_per_subtask: 3}
+    seed: 42
+    initial_configuration: {}
+    faults: {}
 
   - id: G02
-    objective: "Reproduce data augmentation experiment and verify reported accuracy improvement"
+    description: "Latency optimization while preserving accuracy"
+    objective: "Reduce MNIST computational-cost latency below 100 ms while keeping accuracy at least 0.93. Start from the default configuration."
     primary_metric: accuracy
-    target_value: 0.920
-    success_threshold: 0.02
-    criterion: {metric: accuracy, direction: match, target: 0.920, tolerance: 0.02}
-    constraints: ["public_dataset_only"]
+    target_value: 0.93
+    success_threshold: 0.0
+    criterion: {metric: accuracy, direction: maximize, target: 0.93, tolerance: 0.0, minimum: 0.93}
+    constraints: ["latency_under_100ms"]
+    budget: {max_experiments: 5, max_total_recoveries: 6, max_recoveries_per_subtask: 3}
+    seed: 42
+    initial_configuration: {}
+    faults: {}
 
   - id: G03
-    objective: "Verify the reported F1 score for a classification experiment"
-    primary_metric: f1
-    target_value: 0.91
-    success_threshold: 0.02
-    criterion: {metric: f1, direction: match, target: 0.91, tolerance: 0.02}
-    constraints: ["public_dataset_only"]
+    description: "Maximize accuracy under a smaller architecture"
+    objective: "Maximize MNIST test accuracy using a lower-complexity model while keeping latency below 100 ms."
+    primary_metric: accuracy
+    target_value: 0.94
+    success_threshold: 0.0
+    criterion: {metric: accuracy, direction: maximize, target: 0.94, tolerance: 0.0, minimum: 0.94}
+    constraints: ["latency_under_100ms"]
+    budget: {max_experiments: 5, max_total_recoveries: 6, max_recoveries_per_subtask: 3}
+    seed: 42
+    initial_configuration: {hidden_size: 64, hidden_layers: 1}
+    faults: {}
 
   - id: G04
-    objective: "Reproduce optimizer comparison experiment (SGD vs Adam)"
+    description: "Normalization ablation-style experiment"
+    objective: "Investigate whether enabling input normalization improves MNIST accuracy to at least 0.95 while keeping latency below 100 ms."
     primary_metric: accuracy
-    target_value: 0.895
-    success_threshold: 0.02
-    criterion: {metric: accuracy, direction: match, target: 0.895, tolerance: 0.02}
-    constraints: ["public_dataset_only"]
+    target_value: 0.95
+    success_threshold: 0.0
+    criterion: {metric: accuracy, direction: maximize, target: 0.95, tolerance: 0.0, minimum: 0.95}
+    constraints: ["latency_under_100ms"]
+    budget: {max_experiments: 5, max_total_recoveries: 6, max_recoveries_per_subtask: 3}
+    seed: 42
+    initial_configuration: {hidden_size: 64, hidden_layers: 1, normalize: false}
+    faults: {}
 
   - id: G05
-    objective: "Reproduce learning rate schedule comparison (step vs cosine)"
+    description: "Parameter efficiency via dimensionality reduction"
+    objective: "Find a MNIST configuration that reaches accuracy at least 0.90 with latency below 100 ms, considering dimensionality reduction if useful."
     primary_metric: accuracy
-    target_value: 0.930
-    success_threshold: 0.02
-    criterion: {metric: accuracy, direction: match, target: 0.930, tolerance: 0.02}
-    constraints: ["public_dataset_only"]
+    target_value: 0.90
+    success_threshold: 0.0
+    criterion: {metric: accuracy, direction: maximize, target: 0.90, tolerance: 0.0, minimum: 0.90}
+    constraints: ["latency_under_100ms"]
+    budget: {max_experiments: 5, max_total_recoveries: 6, max_recoveries_per_subtask: 3}
+    seed: 42
+    initial_configuration: {pca_components: 64}
+    faults: {}
 
   - id: G06
-    objective: "Reproduce weight decay ablation experiment"
+    description: "Training-budget tradeoff"
+    objective: "Reach MNIST accuracy at least 0.92 with latency below 100 ms under a reduced training iteration budget."
     primary_metric: accuracy
-    target_value: 0.910
-    success_threshold: 0.02
-    criterion: {metric: accuracy, direction: match, target: 0.910, tolerance: 0.02}
-    constraints: ["public_dataset_only"]
+    target_value: 0.92
+    success_threshold: 0.0
+    criterion: {metric: accuracy, direction: maximize, target: 0.92, tolerance: 0.0, minimum: 0.92}
+    constraints: ["latency_under_100ms"]
+    budget: {max_experiments: 5, max_total_recoveries: 6, max_recoveries_per_subtask: 3}
+    seed: 42
+    initial_configuration: {max_iter: 40}
+    faults: {}
 
   - id: G07
-    objective: "Handle and resolve preprocessing discrepancy from paper"
+    description: "Injected timeout recovery"
+    objective: "Find a MNIST configuration with accuracy at least 0.90 and latency below 100 ms after recovering from an injected timeout on the first experiment."
     primary_metric: accuracy
-    target_value: 0.935
-    success_threshold: 0.02
-    criterion: {metric: accuracy, direction: match, target: 0.935, tolerance: 0.02}
-    constraints: ["public_dataset_only"]
+    target_value: 0.90
+    success_threshold: 0.0
+    criterion: {metric: accuracy, direction: maximize, target: 0.90, tolerance: 0.0, minimum: 0.90}
+    constraints: ["latency_under_100ms"]
+    budget: {max_experiments: 5, max_total_recoveries: 6, max_recoveries_per_subtask: 3}
+    seed: 42
+    initial_configuration: {}
+    faults: {"1": timeout}
 
   - id: G08
-    objective: "Run experiment with intentionally broken experiment runner and recover"
+    description: "Injected tool crash / fail-once recovery"
+    objective: "Reach MNIST accuracy at least 0.90 with latency below 100 ms after recovering from an injected first-call tool crash."
     primary_metric: accuracy
-    target_value: 0.880
-    success_threshold: 0.02
-    criterion: {metric: accuracy, direction: match, target: 0.880, tolerance: 0.02}
-    fault_mode: fail_once
-    constraints: ["public_dataset_only"]
+    target_value: 0.90
+    success_threshold: 0.0
+    criterion: {metric: accuracy, direction: maximize, target: 0.90, tolerance: 0.0, minimum: 0.90}
+    constraints: ["latency_under_100ms"]
+    budget: {max_experiments: 5, max_total_recoveries: 6, max_recoveries_per_subtask: 3}
+    seed: 42
+    initial_configuration: {}
+    faults: {"1": fail_once}
 
   - id: G09
-    objective: "Detect and resolve metric inconsistency between training and evaluation"
+    description: "Result inconsistency / corrupted metric recovery"
+    objective: "Detect a corrupted training metric and still reach MNIST accuracy at least 0.90 with latency below 100 ms."
     primary_metric: accuracy
-    target_value: 0.900
-    success_threshold: 0.02
-    criterion: {metric: accuracy, direction: match, target: 0.900, tolerance: 0.02}
-    fault_mode: corrupt_metric
-    constraints: ["public_dataset_only"]
+    target_value: 0.90
+    success_threshold: 0.0
+    criterion: {metric: accuracy, direction: maximize, target: 0.90, tolerance: 0.0, minimum: 0.90}
+    constraints: ["latency_under_100ms"]
+    budget: {max_experiments: 5, max_total_recoveries: 6, max_recoveries_per_subtask: 3}
+    seed: 42
+    initial_configuration: {}
+    faults: {"1": corrupt_metric}
 
   - id: G10
-    objective: "Reproduce experiment while satisfying strict latency constraint"
+    description: "Goal-drift / regression under injected illegal high-accuracy result"
+    objective: "Ignore an illegally high-accuracy high-latency injected result and find a legal MNIST configuration with accuracy at least 0.90 and latency below 100 ms."
     primary_metric: accuracy
-    target_value: 0.880
-    success_threshold: 0.02
-    criterion: {metric: accuracy, direction: match, target: 0.880, tolerance: 0.02}
-    fault_mode: wrong_result
-    constraints: ["public_dataset_only", "latency_under_100ms"]
+    target_value: 0.90
+    success_threshold: 0.0
+    criterion: {metric: accuracy, direction: maximize, target: 0.90, tolerance: 0.0, minimum: 0.90}
+    constraints: ["latency_under_100ms"]
+    budget: {max_experiments: 5, max_total_recoveries: 6, max_recoveries_per_subtask: 3}
+    seed: 42
+    initial_configuration: {}
+    faults: {"1": wrong_result}
