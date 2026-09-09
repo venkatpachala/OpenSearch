@@ -84,6 +84,30 @@ class ReproductionVerdict(str, Enum):
     REFUTED = "refuted"
 
 
+class ConfigurationOutcome(str, Enum):
+    """Outcome of a concrete experiment configuration."""
+
+    SUCCESS = "SUCCESS"
+    CONSTRAINT_VIOLATION = "CONSTRAINT_VIOLATION"
+    OBJECTIVE_FAILURE = "OBJECTIVE_FAILURE"
+    TOOL_FAILURE = "TOOL_FAILURE"
+    INVALID_CONFIGURATION = "INVALID_CONFIGURATION"
+    NO_PROGRESS = "NO_PROGRESS"
+
+
+class ProgressKind(str, Enum):
+    NEW_VALID_CONFIGURATION = "NEW_VALID_CONFIGURATION"
+    IMPROVED_OBJECTIVE = "IMPROVED_OBJECTIVE"
+    FIXED_FAILED_CONSTRAINT = "FIXED_FAILED_CONSTRAINT"
+    NEW_EVIDENCE = "NEW_EVIDENCE"
+    MEANINGFUL_STRATEGY_CHANGE = "MEANINGFUL_STRATEGY_CHANGE"
+    DUPLICATE_CONFIGURATION = "DUPLICATE_CONFIGURATION"
+    SAME_FAILURE_WITHOUT_CHANGE = "SAME_FAILURE_WITHOUT_CHANGE"
+    INVALID_ACTION_REPEATED = "INVALID_ACTION_REPEATED"
+    IDENTICAL_REJECTED_PROPOSAL = "IDENTICAL_REJECTED_PROPOSAL"
+    NO_MEANINGFUL_METRIC_CHANGE = "NO_MEANINGFUL_METRIC_CHANGE"
+
+
 # ---------------------------------------------------------------------------
 # Budget & Constraints
 # ---------------------------------------------------------------------------
@@ -271,6 +295,8 @@ class Experiment(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     parent_id: str | None = None
     hypothesis: str = ""
+    reason: str = ""
+    trigger: str = ""
     code_changes: list[str] = Field(default_factory=list)
     parameters: dict[str, Any] = Field(default_factory=dict)
     expected_result: dict[str, Any] = Field(default_factory=dict)
@@ -361,6 +387,24 @@ class ReproductionAssessment(BaseModel):
     independently_verified: bool | None = None
     verdict: ReproductionVerdict = ReproductionVerdict.INCONCLUSIVE
     rationale: str = ""
+    limitation: str | None = None
+
+
+class ConfigurationRecord(BaseModel):
+    """Memory of one concrete configuration that was proposed or executed."""
+
+    fingerprint: str
+    config: dict[str, Any] = Field(default_factory=dict)
+    experiment_id: str | None = None
+    accuracy: float | None = None
+    latency_ms: float | None = None
+    constraint_status: str = ""
+    criterion_status: dict[str, str] = Field(default_factory=dict)
+    failure_type: FailureType | None = None
+    hypothesis: str = ""
+    outcome: ConfigurationOutcome = ConfigurationOutcome.NO_PROGRESS
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    retry_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +468,7 @@ class ResearchMemory(BaseModel):
     # Experiment lineage
     experiments: list[Experiment] = Field(default_factory=list)
     best_experiment_id: str | None = None
+    best_observed_accuracy_id: str | None = None
 
     # Reasoning trail
     hypotheses: list[Hypothesis] = Field(default_factory=list)
@@ -444,6 +489,11 @@ class ResearchMemory(BaseModel):
     # Planner no-progress: repeated rejected configurations
     no_progress_count: int = 0
     blocked_proposals: list[dict[str, Any]] = Field(default_factory=list)
+    tested_configs: dict[str, ConfigurationRecord] = Field(default_factory=dict)
+    rejected_configs: dict[str, str] = Field(default_factory=dict)
+    terminate_reason: str | None = None
+    last_progress_kind: str | None = None
+    independently_verified_experiment_id: str | None = None
 
     # ---------- Convenience helpers ----------
 
@@ -459,9 +509,15 @@ class ResearchMemory(BaseModel):
         """Pick the best constraint-satisfying experiment. Illegal runs stay off best."""
         best_val: float | None = None
         self.best_experiment_id = None
+        observed_acc: float | None = None
+        self.best_observed_accuracy_id = None
         for exp in self.experiments:
             if not exp.observed_result:
                 continue
+            acc = exp.observed_result.accuracy
+            if acc is not None and (observed_acc is None or acc > observed_acc):
+                observed_acc = acc
+                self.best_observed_accuracy_id = exp.id
             val = exp.observed_result.get_metric(metric)
             if val is None:
                 continue
@@ -475,6 +531,14 @@ class ResearchMemory(BaseModel):
             if best_val is None or val > best_val:
                 best_val = val
                 self.best_experiment_id = exp.id
+
+    def get_best_observed_accuracy(self) -> ExperimentResult | None:
+        if not self.best_observed_accuracy_id:
+            return None
+        for exp in self.experiments:
+            if exp.id == self.best_observed_accuracy_id:
+                return exp.observed_result
+        return None
 
     def recent_failures(self, n: int = 3) -> list[Failure]:
         return self.failures[-n:]
