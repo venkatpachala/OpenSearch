@@ -27,7 +27,7 @@ from ..experiments.checkpoints import GitCheckpointer
 class RunExperimentRequest(ToolRequest):
     experiment_id: str
     parameters: dict = {}
-    timeout_seconds: int = 300
+    timeout_seconds: int = 600
     seed: int = 42
     parent_experiment_id: str | None = None
 
@@ -285,6 +285,7 @@ def build_real_registry(
     eval_script_path: Path,
     fault_schedule: dict[str, FaultMode] | None = None,
     live_papers: bool = True,
+    default_fault_mode: FaultMode | None = None,
 ) -> ToolRegistry:
     """
     Build and return a ToolRegistry with real execution tools.
@@ -303,6 +304,7 @@ def build_real_registry(
         runner = FaultInjectingRunner(
             base_runner=base_runner,
             fault_schedule=fault_schedule,
+            default_mode=default_fault_mode or FaultMode.NORMAL,
         )
     else:
         runner = base_runner

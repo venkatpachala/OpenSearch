@@ -34,6 +34,7 @@ class EventType(str, Enum):
     RECOVERY_STARTED = "recovery_started"
     RECOVERY_COMPLETED = "recovery_completed"
     REPLAN = "replan"
+    NO_PROGRESS = "no_progress"
 
     # Experiments
     EXPERIMENT_STARTED = "experiment_started"
@@ -46,6 +47,9 @@ class EventType(str, Enum):
     # Budget
     BUDGET_WARNING = "budget_warning"
     BUDGET_EXHAUSTED = "budget_exhausted"
+
+    # Goal achievement
+    GOAL_ACHIEVED = "goal_achieved"
 
     # Terminal
     FINAL_REPORT = "final_report"
