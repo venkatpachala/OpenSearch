@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..memory.models import GoalContract, ResearchMemory
+from ..memory.models import GoalContract, ResearchMemory, ReproductionVerdict
 
 
 @dataclass
@@ -29,6 +29,9 @@ class MetricCheck:
     achieved: bool
     gap: float | None
     gap_pct: float | None
+    direction: str = "match"
+    minimum: float | None = None
+    maximum: float | None = None
 
 
 @dataclass
@@ -64,6 +67,15 @@ class BudgetCheck:
 
 
 @dataclass
+class ReproductionCheck:
+    metric_success: bool
+    methodology_aligned: bool | None
+    independently_verified: bool | None
+    verdict: ReproductionVerdict
+    rationale: str
+
+
+@dataclass
 class GoalCheckResult:
     """Complete deterministic check result — fed to LLM as facts."""
 
@@ -72,6 +84,7 @@ class GoalCheckResult:
     regression: RegressionCheck
     non_determinism: NonDeterminismCheck
     budget: BudgetCheck
+    reproduction: ReproductionCheck
 
     @property
     def any_constraint_violated(self) -> bool:
@@ -111,6 +124,13 @@ class GoalCheckResult:
             "budget_recoveries_remaining": self.budget.recoveries_remaining,
             "budget_at_risk": self.budget.at_risk,
             "budget_exhausted": self.budget.exhausted,
+            "reproduction": {
+                "metric_success": self.reproduction.metric_success,
+                "methodology_aligned": self.reproduction.methodology_aligned,
+                "independently_verified": self.reproduction.independently_verified,
+                "verdict": self.reproduction.verdict.value,
+                "rationale": self.reproduction.rationale,
+            },
         }
 
 
@@ -138,32 +158,62 @@ class GoalChecker:
             regression=self._check_regression(memory, goal.primary_metric, observed_value),
             non_determinism=self._check_non_determinism(memory, goal.primary_metric),
             budget=self._check_budget(memory, goal),
+            reproduction=self._check_reproduction(memory, tool_response, observed_value, goal),
         )
+
+    def _check_reproduction(self, memory: ResearchMemory, response: dict[str, Any], observed: float | None, goal: GoalContract) -> ReproductionCheck:
+        metric_success = self._check_metric(goal, observed).achieved
+        data = response.get("data", {})
+        alignment = data.get("methodology_aligned", response.get("methodology_aligned"))
+        verified = data.get("independently_verified", response.get("independently_verified"))
+        if alignment is False or verified is False:
+            verdict = ReproductionVerdict.REFUTED
+            rationale = "Metric or independent evidence explicitly failed reproduction requirements"
+        elif metric_success and alignment is True and verified is True:
+            verdict = ReproductionVerdict.CONFIRMED
+            rationale = "Metric, methodology alignment, and independent verification all passed"
+        else:
+            verdict = ReproductionVerdict.INCONCLUSIVE
+            rationale = "Metric result is available, but methodology alignment or independent verification is unresolved"
+        return ReproductionCheck(metric_success, alignment, verified, verdict, rationale)
 
     # ── Individual checks ────────────────────────────────────────────────────
 
     def _check_metric(self, goal: GoalContract, observed: float | None) -> MetricCheck:
-        if observed is None or goal.target_value is None:
+        criterion = goal.criterion
+        target = criterion.target if criterion else goal.target_value
+        tolerance = criterion.tolerance if criterion and criterion.tolerance is not None else goal.success_threshold
+        direction = criterion.direction if criterion else "match"
+        if observed is None or (target is None and not criterion):
             return MetricCheck(
                 metric=goal.primary_metric,
-                target_value=goal.target_value,
+                target_value=target,
                 observed_value=observed,
-                success_threshold=goal.success_threshold,
+                success_threshold=tolerance,
                 achieved=False,
                 gap=None,
                 gap_pct=None,
+                direction=direction,
+                minimum=criterion.minimum if criterion else None,
+                maximum=criterion.maximum if criterion else None,
             )
-        gap = abs(goal.target_value - observed)
-        gap_pct = gap / max(goal.target_value, 1e-9) * 100
-        achieved = gap <= goal.success_threshold
+        gap = abs(target - observed) if target is not None else None
+        gap_pct = gap / max(abs(target), 1e-9) * 100 if gap is not None else None
+        if criterion:
+            achieved = criterion.satisfied(observed)
+        else:
+            achieved = gap <= goal.success_threshold
         return MetricCheck(
             metric=goal.primary_metric,
-            target_value=goal.target_value,
+            target_value=target,
             observed_value=observed,
-            success_threshold=goal.success_threshold,
+            success_threshold=tolerance,
             achieved=achieved,
-            gap=round(gap, 4),
-            gap_pct=round(gap_pct, 2),
+            gap=round(gap, 4) if gap is not None else None,
+            gap_pct=round(gap_pct, 2) if gap_pct is not None else None,
+            direction=direction,
+            minimum=criterion.minimum if criterion else None,
+            maximum=criterion.maximum if criterion else None,
         )
 
     def _check_constraints(

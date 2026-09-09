@@ -74,6 +74,11 @@ class FailureTaxonomyClassifier:
         if r:
             return r
 
+        # Explicit resource signals are distinct from generic tool crashes.
+        r = self._check_resource_failure(tool_response)
+        if r:
+            return r
+
         # Rule 2: TOOL_CRASH — execution failure
         r = self._check_tool_crash(tool_response)
         if r:
@@ -108,6 +113,18 @@ class FailureTaxonomyClassifier:
         )
 
     # ── Rules ────────────────────────────────────────────────────────────────
+
+    def _check_resource_failure(self, response: dict) -> TaxonomyResult | None:
+        """Classify only explicit resource signals; legacy generic timeouts remain tool_crash."""
+        data = response.get("data", {})
+        if response.get("resource_failure") or data.get("resource_failure"):
+            return TaxonomyResult(
+                failure_type=FailureType.RESOURCE_FAILURE,
+                confidence=0.98,
+                reason="Execution reported an explicit resource exhaustion/unavailability signal",
+                supporting_facts={"error": response.get("error"), "resource": data.get("resource")},
+            )
+        return None
 
     def _check_schema_error(self, response: dict) -> TaxonomyResult | None:
         error = response.get("error", "")

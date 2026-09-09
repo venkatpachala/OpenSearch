@@ -349,10 +349,16 @@ class SelfEvaluator:
     ) -> EvaluationResult:
         """Stage 1 fallback when LLM call fails."""
         decision = Decision.CONTINUE
+        failure_type = taxonomy.failure_type
         if taxonomy.is_failure:
             decision = Decision.DIAGNOSE_AND_RECOVER
+        if goal_check.any_constraint_violated:
+            decision = Decision.DIAGNOSE_AND_RECOVER
+            if failure_type is None:
+                failure_type = FailureType.GOAL_DRIFT
         if goal_check.all_good:
             decision = Decision.GOAL_ACHIEVED
+            failure_type = None
 
         return EvaluationResult(
             execution_success=not taxonomy.is_failure
@@ -361,7 +367,7 @@ class SelfEvaluator:
             metric_valid=goal_check.metric.observed_value is not None,
             goal_progress=(
                 GoalProgress.POSITIVE if goal_check.metric.achieved
-                else GoalProgress.NEGATIVE if taxonomy.is_failure
+                else GoalProgress.NEGATIVE if taxonomy.is_failure or goal_check.any_constraint_violated
                 else GoalProgress.NEUTRAL
             ),
             constraint_status=(
@@ -371,15 +377,19 @@ class SelfEvaluator:
             ),
             hypothesis_status=(
                 HypothesisStatus.REJECTED
-                if taxonomy.is_failure
+                if taxonomy.is_failure or goal_check.any_constraint_violated
                 else HypothesisStatus.INCONCLUSIVE
             ),
-            failure_type=taxonomy.failure_type,
+            failure_type=failure_type,
             decision=decision,
             confidence=0.70,
             rationale=(
                 f"[Fallback — LLM unavailable] "
-                + (taxonomy.reason if taxonomy.is_failure else "No failure detected")
+                + (
+                    taxonomy.reason if taxonomy.is_failure
+                    else "Constraint violated" if goal_check.any_constraint_violated
+                    else "No failure detected"
+                )
             ),
             goal_check=goal_check.to_dict(),
             taxonomy_result={
