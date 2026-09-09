@@ -129,10 +129,26 @@ class FailureTaxonomyClassifier:
     def _check_schema_error(self, response: dict) -> TaxonomyResult | None:
         error = response.get("error", "")
         data = response.get("data", {})
+        error_l = error.lower() if isinstance(error, str) else ""
+        argparse_schema = any(
+            token in error_l
+            for token in (
+                "unrecognized arguments",
+                "invalid choice",
+                "the following arguments are required",
+                "invalid int value",
+                "invalid float value",
+                "argument --",
+            )
+        ) and any(
+            token in error_l
+            for token in ("unrecognized", "invalid", "required", "expected", "argument")
+        )
         if (
             error == "TOOL_SCHEMA_ERROR"
             or data.get("error_type") == "TOOL_SCHEMA_ERROR"
-            or (isinstance(error, str) and "schema" in error.lower())
+            or (isinstance(error, str) and "schema" in error_l)
+            or argparse_schema
         ):
             return TaxonomyResult(
                 failure_type=FailureType.TOOL_SCHEMA_ERROR,

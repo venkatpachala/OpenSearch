@@ -197,6 +197,36 @@ class SelfEvaluator:
         if goal_check.all_good:
             return self._make_success_result(goal_check, taxonomy, discrepancy_analysis)
 
+        # Objective miss with legal constraints is planner evidence, not recovery.
+        if (
+            not taxonomy.is_failure
+            and not goal_check.any_constraint_violated
+            and not goal_check.metric.achieved
+        ):
+            return EvaluationResult(
+                execution_success=True,
+                output_valid=True,
+                metric_valid=goal_check.metric.observed_value is not None,
+                goal_progress=GoalProgress.NEGATIVE,
+                constraint_status=ConstraintStatus.ALL_MET,
+                hypothesis_status=HypothesisStatus.REJECTED,
+                failure_type=None,
+                decision=Decision.CONTINUE,
+                confidence=0.95,
+                rationale=(
+                    f"Primary metric missed the target "
+                    f"({goal_check.metric.observed_value} vs {goal_check.metric.target_value}) "
+                    "while constraints hold. Planner must change the blocking criterion."
+                ),
+                goal_check=goal_facts,
+                taxonomy_result={
+                    "failure_type": None,
+                    "confidence": taxonomy.confidence,
+                    "reason": taxonomy.reason,
+                },
+                discrepancy_analysis=discrepancy_analysis.to_dict() if discrepancy_analysis else None,
+            )
+
         # ── Stage 2: LLM synthesis ────────────────────────────────────────────
         try:
             return self._llm_evaluate(
@@ -242,6 +272,17 @@ class SelfEvaluator:
         if taxonomy.is_failure and raw.get("failure_type") is None:
             raw["failure_type"] = taxonomy.failure_type.value
             raw["confidence"] = min(raw.get("confidence", 0.7), taxonomy.confidence)
+        if goal_facts.get("any_constraint_violated"):
+            raw["constraint_status"] = ConstraintStatus.VIOLATED.value
+            if goal_facts.get("metric_achieved"):
+                raw["failure_type"] = FailureType.GOAL_DRIFT.value
+                raw["decision"] = Decision.DIAGNOSE_AND_RECOVER.value
+        else:
+            if raw.get("failure_type") == FailureType.GOAL_DRIFT.value:
+                raw["failure_type"] = taxonomy.failure_type.value if taxonomy.failure_type else None
+            raw["constraint_status"] = ConstraintStatus.ALL_MET.value
+            if not taxonomy.is_failure and raw.get("decision") == Decision.GOAL_ACHIEVED.value:
+                raw["decision"] = Decision.CONTINUE.value
 
         return EvaluationResult(
             **raw,
