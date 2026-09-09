@@ -7,6 +7,12 @@ import statistics
 import time
 from typing import Any
 
+from ..agent.planning_context import (
+    action_was_repaired,
+    canonicalize_tool_args,
+    repair_from_argparse_error,
+    validate_configuration,
+)
 from ..memory.models import FailureType
 from .base import RecoveryContext, RecoveryOutcome, RecoveryStrategy
 
@@ -80,15 +86,61 @@ class SchemaRepairStrategy(RecoveryStrategy):
     name = "schema_validate_and_repair"
 
     def recover(self, context: RecoveryContext) -> RecoveryOutcome:
-        errors = context.tool_response.get("data", {}).get("field_errors", [])
-        if context.schema_repair is None:
-            return RecoveryOutcome(False, self.name, "No typed schema repair callback configured", unresolved="schema repair unavailable")
-        repaired = context.schema_repair(context.tool_args, errors)
-        return RecoveryOutcome(True, self.name, "Repaired tool arguments from Pydantic field feedback", {"tool_args": repaired}, retry=True,
-                              diagnosis="Tool arguments violated the typed request schema",
-                              evidence_used=[str(x) for x in errors],
-                              expected_observation="The repaired arguments validate and the tool executes",
-                              plan_change="Replace invalid arguments with schema-conforming values")
+        original = copy.deepcopy(context.tool_args)
+        error = str(context.tool_response.get("error", "") or "")
+        data = context.tool_response.get("data") or {}
+        if isinstance(data, dict):
+            errors = data.get("field_errors", [])
+            if not error:
+                error = str(data.get("message") or "")
+        else:
+            errors = []
+        repaired = canonicalize_tool_args(original)
+        repaired = repair_from_argparse_error(repaired, error)
+        if context.schema_repair is not None:
+            repaired = context.schema_repair(repaired, errors)
+        params = repaired.get("parameters") if isinstance(repaired.get("parameters"), dict) else {}
+        invalid = validate_configuration(params)
+        if invalid and not action_was_repaired(original, repaired):
+            return RecoveryOutcome(
+                False,
+                self.name,
+                "Schema repair exhausted; invalid action cannot be mapped to a valid tool parameter",
+                {"original_action": original, "error": error, "repair": None, "repaired_action": repaired},
+                unresolved="schema repair exhausted",
+                diagnosis=error or "Tool arguments violated the typed request schema",
+                evidence_used=[str(x) for x in errors] + ([error] if error else []),
+            )
+        if not action_was_repaired(original, repaired) and not invalid:
+            # Canonicalization already made the action valid; retry it.
+            pass
+        elif not action_was_repaired(original, repaired):
+            return RecoveryOutcome(
+                False,
+                self.name,
+                "Repaired action is identical to the invalid original action",
+                {"original_action": original, "error": error, "repair": None, "repaired_action": repaired},
+                unresolved="schema repair exhausted",
+                diagnosis=error or "Unable to repair invalid tool arguments",
+                evidence_used=[error] if error else [str(x) for x in errors],
+            )
+        return RecoveryOutcome(
+            True,
+            self.name,
+            "Repaired tool arguments from schema/argparse feedback",
+            {
+                "tool_args": repaired,
+                "original_action": original,
+                "error": error,
+                "repair": "canonicalize_aliases_and_schema",
+                "repaired_action": repaired,
+            },
+            retry=True,
+            diagnosis=error or "Tool arguments violated the typed request schema",
+            evidence_used=[str(x) for x in errors] + ([error] if error else []),
+            expected_observation="The repaired arguments validate and the tool executes",
+            plan_change="Replace invalid arguments with schema-conforming values",
+        )
 
 
 class ResultInconsistencyRecoveryStrategy(RecoveryStrategy):
