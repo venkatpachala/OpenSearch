@@ -22,10 +22,18 @@ class RecoveryOrchestrator:
             return RecoveryOutcome(False, "unknown", "No strategy registered", unresolved="unknown failure type")
         memory.budget.consume_recovery(key)
         outcome = strategy.recover(context)
-        recovery = Recovery(failure_id=context.failure.id, strategy=outcome.strategy, action_taken=outcome.action_taken, success=outcome.success)
+        recovery = Recovery(
+            failure_id=context.failure.id,
+            strategy=outcome.strategy,
+            action_taken=outcome.action_taken,
+            success=outcome.success,
+            diagnosis=outcome.diagnosis or outcome.action_taken,
+            evidence_used=outcome.evidence_used,
+            expected_observation=outcome.expected_observation,
+            plan_change=outcome.plan_change,
+        )
         memory.recoveries.append(recovery)
         context.failure.recovered = outcome.success
         if outcome.unresolved:
             memory.unresolved_questions.append(outcome.unresolved)
         return outcome
-

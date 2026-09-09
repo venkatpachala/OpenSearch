@@ -32,6 +32,22 @@ class RecoveryOutcome:
     updates: dict[str, Any] = field(default_factory=dict)
     retry: bool = False
     unresolved: str | None = None
+    diagnosis: str = ""
+    evidence_used: list[str] = field(default_factory=list)
+    expected_observation: str = ""
+    plan_change: str = ""
+
+
+@dataclass
+class RecoveryDecision:
+    """Auditable decision emitted before actuation."""
+
+    failure_type: FailureType
+    diagnosis: str
+    evidence_used: list[str]
+    action: str
+    expected_observation: str
+    plan_change: str
 
 
 class RecoveryStrategy:
@@ -40,4 +56,3 @@ class RecoveryStrategy:
 
     def recover(self, context: RecoveryContext) -> RecoveryOutcome:
         raise NotImplementedError
-

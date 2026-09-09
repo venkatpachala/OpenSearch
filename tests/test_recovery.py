@@ -56,8 +56,28 @@ class TestRecoveryStrategies:
         )
         outcome = strat.recover(ctx)
         assert outcome.success is True
+        assert outcome.retry is True
         assert outcome.updates["tool_args"]["timeout_seconds"] == 150
         assert outcome.updates["tool_args"]["parameters"]["epochs"] == 10
+        assert outcome.updates["tool_args"]["experiment_id"] == "exp_02"
+
+    def test_tool_crash_matches_timed_out_wording_and_bumps_id(self):
+        """The real runner says 'timed out', not 'timeout'."""
+        strat = ToolCrashRecoveryStrategy()
+        mem = _make_memory()
+        ctx = RecoveryContext(
+            memory=mem,
+            failure=Failure(failure_type=FailureType.TOOL_CRASH, description="timeout", step_index=1),
+            tool_args={"experiment_id": "exp_01", "timeout_seconds": 300, "parameters": {"max_iter": 100, "normalize": True}},
+            tool_response={"success": False, "error": "Experiment timed out after 300s. Partial stdout: Epoch 1/200"},
+        )
+        outcome = strat.recover(ctx)
+        assert outcome.success is True
+        assert outcome.retry is True
+        args = outcome.updates["tool_args"]
+        assert args["experiment_id"] == "exp_02"
+        assert args["parameters"]["max_iter"] == 50
+        assert "timeout" in outcome.action_taken.lower() or "iteration" in outcome.action_taken.lower()
 
     def test_schema_repair_invokes_callback(self):
         strat = SchemaRepairStrategy()
