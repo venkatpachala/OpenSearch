@@ -78,6 +78,11 @@ def run(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Parse goal and exit without running the agent"
     ),
+    parameter: list[str] = typer.Option(
+        [],
+        "--parameter",
+        help="Starting train.py parameter for the first experiment (e.g. max_iter=20)",
+    ),
 ) -> None:
     """Start a new research reproduction run."""
     from .config import Config
@@ -103,6 +108,26 @@ def run(
     ))
     direction = "maximize" if is_maximize else "match"
 
+    def _parse_starting_parameters(items: list[str]) -> dict:
+        out: dict = {}
+        for item in items:
+            if "=" not in item:
+                continue
+            key, raw = item.split("=", 1)
+            key, raw = key.strip(), raw.strip()
+            lowered = raw.lower()
+            if lowered in {"true", "false"}:
+                out[key] = lowered == "true"
+                continue
+            try:
+                out[key] = int(raw)
+            except ValueError:
+                try:
+                    out[key] = float(raw)
+                except ValueError:
+                    out[key] = raw
+        return out
+
     # Build goal contract
     constraints = [Constraint(name=c, description=c) for c in constraint]
     goal = GoalContract(
@@ -127,6 +152,7 @@ def run(
             max_recoveries_per_subtask=config.max_recoveries_per_subtask,
             max_total_recoveries=config.max_recoveries,
         ),
+        starting_parameters=_parse_starting_parameters(parameter),
     )
 
     console.print(

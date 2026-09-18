@@ -595,3 +595,70 @@ def test_scripted_self_correction_sequence(tmp_path):
     events = (tmp_path / "seq" / "run.jsonl").read_text(encoding="utf-8")
     assert "proposal_created" in events or "PROPOSAL_CREATED" in events or '"proposal_created"' in events
     assert "goal_drift" in events or "GOAL_DRIFT" in events or "goal_drift" in events.lower()
+
+
+def _accuracy_goal(**kwargs) -> GoalContract:
+    data = dict(
+        objective="Run the existing MNIST image-classification experiment starting from max_iter=20.",
+        primary_metric="accuracy",
+        target_value=0.92,
+        success_threshold=0.0,
+        criterion=MetricCriterion(
+            metric="accuracy", direction="maximize", target=0.92, tolerance=0.0, minimum=0.92
+        ),
+        max_experiments=4,
+        starting_parameters={"hidden_size": 72, "hidden_layers": 1, "max_iter": 20},
+    )
+    data.update(kwargs)
+    return GoalContract(**data)
+
+
+def test_accuracy_miss_increases_max_iter_20_to_40():
+    mem = ResearchMemory(goal=_accuracy_goal(), run_id="iter")
+    params = {"hidden_size": 72, "hidden_layers": 1, "max_iter": 20, "normalize": False}
+    mem.experiments.append(_exp("experiment_001", 0.913, 83.7, params))
+    mem.tested_configs[configuration_fingerprint({"parameters": params})] = ConfigurationRecord(
+        fingerprint=configuration_fingerprint({"parameters": params}),
+        config=params,
+        experiment_id="experiment_001",
+        accuracy=0.913,
+        latency_ms=83.7,
+        outcome=ConfigurationOutcome.OBJECTIVE_FAILURE,
+    )
+    nxt = deterministic_next_parameters(mem)
+    assert nxt is not None
+    assert nxt["max_iter"] == 40
+    assert nxt["hidden_size"] == 72
+    assert nxt["hidden_layers"] == 1
+
+
+def test_first_experiment_uses_starting_max_iter():
+    mem = ResearchMemory(goal=_accuracy_goal(), run_id="start")
+    planner = Planner()
+    raw = Planner._coerce_planner_output({"selected_tool": "search_literature", "tool_arguments": {"query": "x"}})
+    output = planner._finalize_output(mem, PlannerOutput(**raw))
+    assert output.selected_tool == "run_experiment"
+    assert output.tool_arguments["parameters"]["max_iter"] == 20
+    assert output.tool_arguments["parameters"]["hidden_size"] == 72
+    assert output.tool_arguments.get("experiment_id")
+
+
+def test_empty_followup_does_not_reset_to_default_128x2():
+    mem = ResearchMemory(goal=_accuracy_goal(), run_id="empty")
+    params = {"hidden_size": 72, "hidden_layers": 1, "max_iter": 20, "normalize": False}
+    mem.experiments.append(_exp("experiment_001", 0.913, 83.7, params))
+    mem.tested_configs[configuration_fingerprint({"parameters": params})] = ConfigurationRecord(
+        fingerprint=configuration_fingerprint({"parameters": params}),
+        config=params,
+        experiment_id="experiment_001",
+        accuracy=0.913,
+        latency_ms=83.7,
+        outcome=ConfigurationOutcome.OBJECTIVE_FAILURE,
+    )
+    planner = Planner()
+    raw = Planner._coerce_planner_output({"parameters": {}})
+    output = planner._finalize_output(mem, PlannerOutput(**raw))
+    got = output.tool_arguments["parameters"]
+    assert got["max_iter"] == 40
+    assert got["hidden_size"] == 72
+    assert configuration_fingerprint(output.tool_arguments) != configuration_fingerprint({"parameters": {}})

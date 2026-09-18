@@ -30,6 +30,7 @@ from .planning_context import (
     best_valid_experiment,
     build_failure_context,
     build_planning_evidence,
+    canonicalize_parameters,
     canonicalize_tool_args,
     deterministic_next_parameters,
     ensure_falsifiable_hypothesis,
@@ -327,6 +328,7 @@ class Planner:
             "failure_context": (
                 ctx.model_dump(mode="json") if (ctx := build_failure_context(memory)) else None
             ),
+            "starting_parameters": getattr(memory.goal, "starting_parameters", None) or {},
             "tested_configurations": tested_configuration_rows(memory),
             "rejected_configurations": rejected_configuration_rows(memory),
             "validity_summary": validity_summary(memory),
@@ -381,7 +383,34 @@ class Planner:
         output.tool_arguments = args
         output.reasoning.hypothesis = hypothesis
         output.reasoning.evidence_basis = evidence_basis
+        start = canonicalize_parameters(getattr(memory.goal, "starting_parameters", None) or {})
+        if start and not memory.experiments:
+            if output.selected_tool != "run_experiment":
+                output.selected_tool = "run_experiment"
+                args = canonicalize_tool_args({"parameters": dict(start)})
+            params = {**experiment_parameters(args), **start}
+            args["parameters"] = canonicalize_parameters(params)
+            output.tool_arguments = args
+            output.reasoning.intended_action = f"run_experiment {args.get('parameters')}"
+            output.reasoning.evidence_basis = (
+                "First experiment uses the goal starting_parameters, including any explicit max_iter."
+            )
         if output.selected_tool == "run_experiment":
+            params = experiment_parameters(args)
+            if memory.experiments and not canonicalize_parameters(params):
+                fallback = deterministic_next_parameters(memory)
+                if fallback:
+                    args["parameters"] = fallback
+                    output.tool_arguments = args
+                    output.reasoning.hypothesis = ensure_falsifiable_hypothesis(memory, output.reasoning.hypothesis, fallback)
+                    output.reasoning.intended_action = f"run_experiment {fallback}"
+                    output.reasoning.evidence_basis = (
+                        evidence.guidance
+                        + " Empty parameters {} were replaced with an evidence-based intervention; they are not a new configuration."
+                    )
+            if not args.get("experiment_id"):
+                args["experiment_id"] = f"exp_{memory.budget.experiments_consumed + 1:02d}"
+                output.tool_arguments = args
             blocked = assess_proposal(memory, output.selected_tool, args)
             if blocked.blocked:
                 fallback = deterministic_next_parameters(memory)

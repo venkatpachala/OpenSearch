@@ -989,6 +989,7 @@ class AgentLoop:
             "whether", "does", "improve", "investigate whether",
             "start from the default", "default configuration",
             "existing mnist", "existing experiment", "highest possible",
+            "max_iter", "start from max_iter", "training iteration",
         )
         needs_literature = not any(kw in obj for kw in direct_experiment_keywords)
 

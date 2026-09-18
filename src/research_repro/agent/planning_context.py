@@ -1248,6 +1248,11 @@ def deterministic_next_parameters(memory: ResearchMemory) -> dict[str, Any] | No
             cand["pca_components"] = 64
             candidates.append(cand)
     if blocking in {"accuracy", "both", None}:
+        cur_iter = int(base.get("max_iter") or 100)
+        if cur_iter < 40:
+            cand = dict(base)
+            cand["max_iter"] = 40
+            candidates.append(cand)
         if not _as_bool(base.get("normalize", False)):
             cand = dict(base)
             cand["normalize"] = True

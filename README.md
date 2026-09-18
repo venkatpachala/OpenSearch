@@ -1,4 +1,4 @@
-# ResearchRepro
+# OepnSearch
 
 A self-correcting multi-step research and experimentation agent.
 
@@ -344,20 +344,6 @@ wall-clock of 20 MNIST campaigns. Existing artifacts are the source of truth.
 7. The “timeout recoveries 2 / success 0.5” aggregate mixes G07 timeout and G08
    crash into one `tool_crash_repair_and_retry` counter; both recoveries
    succeeded in the artifacts.
-
-## What you would improve with more time
-
-The current implementation demonstrates the core self-correction loop end-to-end, but there are several areas I would improve with additional development time:
-
-1. Stronger adaptive planning: Make replanning more capable of selecting meaningful alternative strategies based on the specific failure, rather than relying partly on deterministic recovery rules.
-2. Broader task coverage: Extend the system beyond the current image-classification and RAG environments to support more complex research, data-extraction, and code-execution workflows.
-3. More robust evaluation: Expand the benchmark with a larger and more diverse set of goals, failure scenarios, and longer multi-step tasks, while strengthening the comparison against non-self-correcting baselines.
-4. Improved tool reliability: Add richer validation, timeout handling, result verification, and recovery strategies for real-world tools and external dependencies.
-5. Better observability: Build a more polished run viewer for inspecting the agent's plan, working memory, tool calls, evaluations, failures, and recovery decisions in a single timeline.
-6. Longer-horizon memory: Improve working-memory management so the agent can retain and prioritize relevant evidence across substantially longer tasks without accumulating unnecessary context.
-
-The main goal would be to move the system from a strong experimental prototype toward a more general-purpose, reliable self-correcting agent that can operate across a wider range of real-world tasks.
-
 
 ## Documentation map
 

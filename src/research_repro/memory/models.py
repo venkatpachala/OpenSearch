@@ -176,6 +176,8 @@ class GoalContract(BaseModel):
     criterion: MetricCriterion | None = None
     max_experiments: int = 8
     allowed_resources: ResourceBudget = Field(default_factory=ResourceBudget)
+    starting_parameters: dict[str, Any] = Field(default_factory=dict)
+    """Optional first-experiment train.py parameters (e.g. max_iter=20)."""
 
     def is_achieved(self, observed: float) -> bool:
         """Check if an observed metric value satisfies the goal."""
